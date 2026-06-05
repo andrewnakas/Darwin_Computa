@@ -106,6 +106,8 @@
 #define X64_SYS_prctl             157
 #define X64_SYS_arch_prctl        158
 #define X64_SYS_ptrace            101
+#define X64_SYS_mount             165
+#define X64_SYS_unshare           272
 #define X64_SYS_gettid            186
 #define X64_SYS_futex             202
 #define X64_SYS_set_tid_address   218
@@ -2651,6 +2653,8 @@ static const char* x64SyscallName(U64 nr) {
         case 99: return "sysinfo";
         case 101: return "ptrace";
         case 102: return "getuid";
+        case 165: return "mount";
+        case 272: return "unshare";
         case 105: return "setuid";
         case 106: return "setgid";
         case 201: return "time";
@@ -2810,6 +2814,23 @@ void ksyscall64(CPU64* cpu) {
             break;
         case X64_SYS_arch_prctl:
             ret = sys_arch_prctl64(cpu, a1, a2);
+            break;
+        case X64_SYS_unshare:
+            // unshare(flags). Darling's launcher unshares mount/PID/UTS/IPC
+            // namespaces to build its container on a real multi-tenant Linux.
+            // The emulated kernel already gives each guest its own private VFS
+            // view and a writable root, so there is nothing to isolate — accept
+            // it as a no-op success. (Darling also honors DARLING_NOOVERLAYFS to
+            // skip the overlay mount entirely.)
+            ret = 0;
+            break;
+        case X64_SYS_mount:
+            // mount(source, target, fstype, flags, data). Same rationale as
+            // unshare: the guest VFS already presents the rootfs/zip layout, so
+            // the launcher's overlayfs/bind mounts are unnecessary. Accept as a
+            // no-op so prefix setup proceeds. (If a real bind is ever needed,
+            // this is where to map it onto the VFS.)
+            ret = 0;
             break;
         case X64_SYS_ptrace:
             // ptrace(request, pid, addr, data). Darling's mldr probes ptrace

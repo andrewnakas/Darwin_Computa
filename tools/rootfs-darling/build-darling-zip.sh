@@ -123,6 +123,17 @@ mkdir -p "$STAGE/etc"; : > "$STAGE/etc/ld.so.cache"
 mkdir -p "$STAGE/usr/libexec/darling"
 cp -aL "$MLDR" "$STAGE/usr/libexec/darling/mldr"
 
+# Stage the Linux-side Darling binaries: darlingserver (the userspace macOS
+# "kernel" process mldr RPCs to over a socket) and the `darling` wrapper, plus
+# their .so closure. darlingserver is the heart of the modern Darling model.
+echo "--- copying darlingserver + darling wrapper + their .so closure ---"
+for dbin in /usr/bin/darlingserver /usr/bin/darling; do
+    [ -e "$dbin" ] || continue
+    copy "$dbin"
+    dlibs=$(ldd "$dbin" 2>/dev/null | awk "/=>/ {print \$3} /ld-linux/ {print \$1}" | grep -E "^/" | sort -u)
+    for l in $dlibs; do copy "$l"; done
+done
+
 # --- overlay layer: the Darwin prefix (dyld, libSystem, frameworks) ---
 # Stage the whole Darling prefix as the guest macOS "/". This is the macOS
 # userland Darling provides; we copy it verbatim so dyld resolves @rpath/
