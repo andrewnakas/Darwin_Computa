@@ -134,15 +134,16 @@ to a GUI. On top of that, Darwin_Computa has:
   `SCM_RIGHTS` + epoll + eventfd. So the path forward is "run Darling's real
   `darlingserver` on the fake kernel," not "reimplement Mach in C++." See
   [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md).
-- ✅ **`darlingserver` loads and runs under the emulator.** Darling's userspace macOS
-  "kernel" — a hefty C++ binary that embeds a *duct-taped XNU* — boots through its full
-  glibc/libstdc++/runtime init (~85 syscalls) on the fake kernel before hitting its own
-  "don't launch me manually" guard. `unshare`/`mount` are faked (no real namespaces/overlay
-  needed — the guest VFS is already private), and it's staged into the rootfs.
-- 🚧 **Next:** satisfy darlingserver's launch handshake so it binds its socket, then complete
-  the `mldr ↔ darlingserver` `dserver_rpc_*` checkin, then the procfs (`/proc/<pid>/maps`,
-  `/proc/self/fd`), `/dev/shm`, and `ptrace`-backed Mach-exception surfaces it uses — then a
-  Mach-O runs to `main`.
+- ✅ **`darlingserver` boots on the emulated kernel — all the way to launching `launchd`.**
+  Darling's userspace macOS "kernel" (a hefty C++ binary embedding a *duct-taped XNU*) runs
+  its full startup on the fake kernel: prefix setup, **binds its Unix socket, runs its epoll
+  loop, forks the container init, and execs `launchd`.** Getting here meant implementing the
+  gaps the trace surfaced — `eventfd`/`timerfd` (wired to the emulator's existing event/timer
+  objects), the `chown` family, root creds (`setuid`/`setres*`), `/etc/passwd`, and faking
+  `unshare`/`mount` (no real namespaces/overlay needed — the guest VFS is already private).
+- 🚧 **Next:** carry `launchd` through (it boots via `mldr`+vchroot inside the prefix), then
+  the `mldr ↔ darlingserver` `dserver_rpc_*` checkin, then `/proc/<pid>/maps` + `ptrace`-backed
+  Mach-exception delivery — then a Mach-O runs to `main`.
 - 🗺️ **Then:** a trivial CLI prints headless → `bash`/`ls` → Cocoa window → a browser tab.
 
 See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap (A→I, shamelessly

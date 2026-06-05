@@ -262,7 +262,10 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
     // prefix is unnecessary; skip it. DPREFIX is the Darwin prefix root inside
     // the rootfs (the staged Darwin "/").
     a.envValues.push_back(BString::copy("DARLING_NOOVERLAYFS=1"));
-    a.envValues.push_back(BString::copy("DPREFIX=/darling-prefix"));
+    // The Darwin prefix is staged at its real install path so darlingserver's
+    // compiled-in mldr/vchroot/launchd paths resolve (it execs e.g.
+    // `mldr vchroot /usr/libexec/darling /sbin/launchd`).
+    a.envValues.push_back(BString::copy("DPREFIX=/usr/libexec/darling"));
 
     // If the target is darlingserver itself, run it DIRECTLY (it is a Linux ELF,
     // not a Mach-O) with the 6-arg contract its main() requires:
@@ -273,7 +276,7 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
     BString first = guestArgs[0];
     if (first.endsWith("darlingserver")) {
         a.addArg(first);
-        a.addArg(BString::copy("/darling-prefix"));   // argv[1] prefix
+        a.addArg(BString::copy("/usr/libexec/darling")); // argv[1] prefix
         a.addArg(BString::copy("0"));                  // argv[2] originalUID
         a.addArg(BString::copy("0"));                  // argv[3] originalGID
         a.addArg(BString::copy("-1"));                 // argv[4] lifetime pipe fd

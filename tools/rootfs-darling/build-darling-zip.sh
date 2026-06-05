@@ -135,14 +135,19 @@ for dbin in /usr/bin/darlingserver /usr/bin/darling; do
 done
 
 # --- overlay layer: the Darwin prefix (dyld, libSystem, frameworks) ---
-# Stage the whole Darling prefix as the guest macOS "/". This is the macOS
-# userland Darling provides; we copy it verbatim so dyld resolves @rpath/
-# /usr/lib/... exactly as on a real Darling install. It is large; that is
-# expected (Phase I makes it streamable for the web build).
-echo "--- copying Darling Darwin prefix (this is the big one) ---"
+# Stage the whole Darling prefix at the SAME guest path it occupies on a real
+# Darling install ($PREFIX, e.g. /usr/libexec/darling) — NOT a renamed path —
+# because darlingserver derives mldr/vchroot/launchd paths from its compiled-in
+# prefix and execs e.g. `mldr vchroot /usr/libexec/darling /sbin/launchd`. The
+# prefix is a full Darwin "/" (sbin/launchd, usr/lib/dyld, usr/libexec/darling/
+# mldr, System/, ...). Also symlink /darling-prefix -> $PREFIX for convenience
+# (the --darwin-run CLI examples / DYLD_ROOT_PATH).
+echo "--- copying Darling Darwin prefix at $PREFIX (this is the big one) ---"
 if [ -d "$PREFIX" ]; then
-    mkdir -p "$STAGE/darling-prefix"
-    cp -aL "$PREFIX/." "$STAGE/darling-prefix/" 2>/dev/null || true
+    mkdir -p "$STAGE$PREFIX"
+    cp -aL "$PREFIX/." "$STAGE$PREFIX/" 2>/dev/null || true
+    # Convenience symlink for the --darwin-run CLI / DYLD_ROOT_PATH examples.
+    ln -sfn "$PREFIX" "$STAGE/darling-prefix" 2>/dev/null || true
 else
     echo "WARNING: DARLING_PREFIX $PREFIX is not a directory; overlay will be thin." >&2
 fi

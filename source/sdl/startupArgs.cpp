@@ -115,6 +115,12 @@ void StartUpArgs::buildVirtualFileSystem() {
     KSystem::procNode = Fs::addFileNode(B("/proc"), B(""), B(""), true, rootNode);
     std::shared_ptr<FsNode> procSysNode = Fs::addFileNode(B("/proc/sys"), B(""), B(""), true, KSystem::procNode);
     std::shared_ptr<FsNode> procSysKernelNode = Fs::addFileNode(B("/proc/sys/kernel"), B(""), B(""), true, procSysNode);
+    // /proc/sys/fs/nr_open: the system max FDs. Darling's darlingserver reads it
+    // to raise RLIMIT_NOFILE; without it it only warns, but provide a sane value.
+    std::shared_ptr<FsNode> procSysFsNode = Fs::addFileNode(B("/proc/sys/fs"), B(""), B(""), true, procSysNode);
+    Fs::addVirtualFile(B("/proc/sys/fs/nr_open"), [](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+        return new BufferAccess(node, flags, B("1048576"));
+        }, K__S_IREAD, k_mdev(0, 0), procSysFsNode);
     Fs::addVirtualFile(B("/proc/sys/kernel/ngroups_max"), [](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
         return new BufferAccess(node, flags, B("65536"));
         }, K__S_IREAD, k_mdev(0, 0), procSysKernelNode);
