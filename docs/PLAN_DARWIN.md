@@ -1,5 +1,34 @@
 # Darwin_Computa — a portable macOS emulator (Darling on emulated Linux)
 
+> ## ⚠️ Architecture update (2026-06-05) — read this first
+>
+> Building the real Darling rootfs (release `v0.1.20260222`) and tracing `mldr`
+> under the emulator revealed that **modern Darling does not use the `/dev/mach`
+> kernel module.** It uses **`darlingserver`** — a userspace Linux ELF
+> (`/usr/bin/darlingserver`) that acts as the macOS "kernel" process; macOS
+> processes RPC their Mach traps to it over a **Unix socket** (`mldr` env
+> `__mldr_sockpath`; calls `dserver_rpc_*`; reports dyld info / exe path / vchroot).
+> darlingserver itself uses epoll, eventfd, socketpair, AF_UNIX, `/dev/shm`,
+> `/proc/<pid>/maps`, and `ptrace`.
+>
+> **This is good news:** it's the same shape as how Boxedwine runs *wineserver*.
+> The plan therefore shifts from "reimplement ~82 Mach traps in C++" to **"run
+> Darling's real `darlingserver` as a guest process on the emulated kernel, and
+> fill the Linux gaps it needs."** Most of those (AF_UNIX + SCM_RIGHTS, epoll,
+> eventfd, socketpair) Boxedwine64 *already* emulates; the new work is procfs
+> surfaces (`/proc/<pid>/maps`, `/proc/self/fd`), `/dev/shm`, and `ptrace`-backed
+> Mach-exception delivery.
+>
+> **Status against this:** the Docker rootfs build works and stages real Darling;
+> `mldr` boots under the emulator through glibc init, the `ptrace` startup probe
+> (syscall #101, now implemented → `-EPERM`), and **opens + mmaps the target
+> Mach-O** — it next blocks on the darlingserver checkin (the socket), which is
+> the Phase C work below. The `/dev/mach` device (commit 4d475be) stays in-tree
+> as a fallback/reference for the older LKM ABI but is not the primary path.
+>
+> The phased text below predates this finding; treat Phase C as "stand up
+> darlingserver over the emulated socket layer" rather than the LKM trap loop.
+
 ## Context
 
 Boxedwine is a *userland* emulator: it implements an x86/x86_64 CPU **plus a fake Linux

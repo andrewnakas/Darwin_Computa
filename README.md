@@ -123,10 +123,20 @@ to a GUI. On top of that, Darwin_Computa has:
   dispatch routes to a software Mach kernel, the boot **handshake traps are answered**
   (`get_api_version`, `task/host/thread_self`, `mach_reply_port`, …), and every trap is
   traceable (`BW64_DEVMACHTRACE=1`). `--darwin-selftest` is **12/12**.
-- 🚧 **Mach IPC + psynch + the commpage** — `mach_msg`, the pthread sync traps (on the
-  emulator's futex), `kqueue`/`kevent` (on epoll), and `vchroot`. This is the next spike:
-  getting `dyld`/libSystem all the way through init.
-- 🗺️ **Then:** a trivial Mach-O prints headless → `bash`/`ls` → Cocoa window → a browser tab.
+- ✅ **Real Darling boots under the emulator.** The Docker rootfs build stages the actual
+  Darling release (`v0.1.20260222`), and `mldr` now runs on the emulated kernel: through
+  glibc/`ld.so` init, the `ptrace` startup probe, and all the way to **opening and mmapping
+  the target Mach-O.** (Trace it with `BW64_SYSTRACE=1`.)
+- 💡 **Architecture pivot (and a gift):** tracing the real binaries showed modern Darling
+  uses **`darlingserver`** — a userspace Linux process that *is* the macOS "kernel,"
+  reached over a **Unix socket** — not the old `/dev/mach` kernel module. That's the same
+  shape as Boxedwine's own `wineserver`, and the emulator already speaks AF_UNIX +
+  `SCM_RIGHTS` + epoll + eventfd. So the path forward is "run Darling's real
+  `darlingserver` on the fake kernel," not "reimplement Mach in C++." See
+  [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md).
+- 🚧 **Next:** stand up `darlingserver` over the emulated socket layer (the `mldr` checkin),
+  plus the procfs/`/dev/shm`/`ptrace` surfaces it needs — then a Mach-O runs to `main`.
+- 🗺️ **Then:** a trivial CLI prints headless → `bash`/`ls` → Cocoa window → a browser tab.
 
 See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap (A→I, shamelessly
 modeled on Boxedwine64's own bring-up log), [`UPSTREAM.md`](UPSTREAM.md) for exactly which

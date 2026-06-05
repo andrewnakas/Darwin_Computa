@@ -105,6 +105,7 @@
 #define X64_SYS_getegid           108
 #define X64_SYS_prctl             157
 #define X64_SYS_arch_prctl        158
+#define X64_SYS_ptrace            101
 #define X64_SYS_gettid            186
 #define X64_SYS_futex             202
 #define X64_SYS_set_tid_address   218
@@ -2648,6 +2649,7 @@ static const char* x64SyscallName(U64 nr) {
         case 96: return "gettimeofday";
         case 98: return "getrusage";
         case 99: return "sysinfo";
+        case 101: return "ptrace";
         case 102: return "getuid";
         case 105: return "setuid";
         case 106: return "setgid";
@@ -2808,6 +2810,17 @@ void ksyscall64(CPU64* cpu) {
             break;
         case X64_SYS_arch_prctl:
             ret = sys_arch_prctl64(cpu, a1, a2);
+            break;
+        case X64_SYS_ptrace:
+            // ptrace(request, pid, addr, data). Darling's mldr probes ptrace
+            // during startup (a Yama/PTRACE_TRACEME check, and darlingserver
+            // uses ptrace_sigexc/thupdate for Mach-exception delivery). The
+            // emulator has no real ptrace; return -EPERM, exactly as the 32-bit
+            // path does (syscall.cpp:syscall_ptrace) and as a Yama-restricted
+            // Linux returns — mldr treats that as "tracing unavailable" and
+            // continues. Real ptrace-backed exception delivery is a later phase
+            // (it pairs with the darlingserver bring-up — see the plan).
+            ret = (U64)-K_EPERM;
             break;
         case X64_SYS_brk:
             ret = sys_brk64(cpu, a1);
