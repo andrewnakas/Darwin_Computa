@@ -25,6 +25,9 @@
 #include "devzero.h"
 #include "devinput.h"
 #include "devdsp.h"
+#ifdef BOXEDWINE_DARWIN
+#include "devmach.h"
+#endif
 #include "procselfexe.h"
 #include "cpuinfo.h"
 #include "bufferaccess.h"
@@ -128,6 +131,13 @@ void StartUpArgs::buildVirtualFileSystem() {
     Fs::addVirtualFile(B("/dev/urandom"), openDevURandom, K__S_IREAD|K__S_IFCHR, k_mdev(1, 9), devNode);
     Fs::addVirtualFile(B("/dev/random"), openDevURandom, K__S_IREAD|K__S_IFCHR, k_mdev(1, 8), devNode);
     Fs::addVirtualFile(B("/dev/null"), openDevNull, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(1, 3), devNode);
+#ifdef BOXEDWINE_DARWIN
+    // The emulated Darling kernel interface. Darling's libsystem_kernel opens
+    // this and issues every Mach/psynch/kqueue trap as ioctl(BASE+trap). See
+    // source/kernel/darwin/devmach.cpp. The real Darling LKM is a misc device
+    // (dynamic minor); we give it a stable major/minor so stat() is sane.
+    Fs::addVirtualFile(B("/dev/mach"), openDevMach, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(10, 0), devNode);
+#endif
     Fs::addVirtualFile(B("/dev/zero"), openDevZero, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(1, 5), devNode);
     Fs::addVirtualFile(B("/proc/meminfo"), openMemInfo, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
     Fs::addVirtualFile(B("/proc/stat"), openProcStat, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);

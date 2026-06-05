@@ -23,6 +23,9 @@
 #ifdef BOXEDWINE_OPENGL
 #include "../opengl/gl64bridge.h"
 #include "../opengl/gl64bridge_abi.h"
+#ifdef BOXEDWINE_DARWIN
+#include "devmach.h"
+#endif
 #endif
 
 // x86-64 Linux syscall numbers used here. The canonical table lives in
@@ -2906,6 +2909,26 @@ void ksyscall64(CPU64* cpu) {
             //    KDSKBMUTE, ...): -ENOTTY, which is what a real kernel returns
             //    for a regular file / non-tty and what wine's fallback expects.
             if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+#ifdef BOXEDWINE_DARWIN
+            // Darwin_Computa: Darling fires Mach/psynch/kqueue traps as
+            // ioctl(/dev/mach, DARLING_MACH_API_BASE + trap, paramv). If this fd
+            // is the /dev/mach device, route the (64-bit) paramv to the trap
+            // dispatcher, which uses cpu->memory (KMemory64) directly. Detected
+            // by the open node's dynamic type, so non-/dev/mach fds are
+            // unaffected and the wine path below is untouched.
+            {
+                KFileDescriptorPtr mfd = cpu->thread->process->getFileDescriptor((FD)(S32)a1);
+                if (mfd) {
+                    std::shared_ptr<KFile> mkfile = std::dynamic_pointer_cast<KFile>(mfd->kobject);
+                    if (mkfile && mkfile->openFile) {
+                        S64 r = devMachIoctl(mkfile->openFile, cpu, (U64)a2, (U64)a3);
+                        if (r != (S64)-K_ENODEV) { ret = (U64)r; break; }
+                        // -ENODEV == "not a DevMach": fall through to the normal
+                        // ioctl handling below.
+                    }
+                }
+            }
+#endif
             U32 cmd = (U32)a2;
             if (cmd == 0x5421) { // FIONBIO: arg = int* (0=blocking, !=0 nonblocking)
                 U32 on = a3 ? cpu->memory->readd(a3) : 0;
