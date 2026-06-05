@@ -258,10 +258,17 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
     a.envValues.push_back(BString::copy("HOME=/home/username"));
     a.envValues.push_back(BString::copy("USER=username"));
     a.envValues.push_back(BString::copy("DISPLAY=:0"));
-    // The emulated kernel gives each guest a private VFS, so Darling's overlayfs
-    // prefix is unnecessary; skip it. DPREFIX is the Darwin prefix root inside
-    // the rootfs (the staged Darwin "/").
-    a.envValues.push_back(BString::copy("DARLING_NOOVERLAYFS=1"));
+    // We deliberately DO NOT set DARLING_NOOVERLAYFS, so darlingserver's
+    // shouldUseOverlayFs() defaults true (we are not WSL1) and it takes the cheap
+    // overlay path: a single mount("overlay", prefix, ...) call. Our emulated
+    // mount/unshare are no-op->0, so that mount is free. The alternative
+    // (DARLING_NOOVERLAYFS=1) path runs copyAndSetAttributes(), a recursive walk
+    // of the ENTIRE 375MB prefix re-stamping owner/perm/mtime on every file
+    // (~400k syscalls, minutes under the interpreter, every launch) — and since
+    // its source LIBEXEC_PATH is compiled as /usr/libexec/darling == our DPREFIX,
+    // it mirrors the tree onto itself: provably pointless work. The overlay's
+    // only job is write-isolation, which our private per-guest VFS + writable
+    // root already provide. DPREFIX is the Darwin prefix root inside the rootfs.
     // The Darwin prefix is staged at its real install path so darlingserver's
     // compiled-in mldr/vchroot/launchd paths resolve (it execs e.g.
     // `mldr vchroot /usr/libexec/darling /sbin/launchd`).
