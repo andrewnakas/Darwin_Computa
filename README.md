@@ -1,160 +1,82 @@
-<div align="center">
+# Darwin_Computa
 
-# 🖥️ Darwin_Computa
-
-### Run macOS apps anywhere. No Mac required. No Linux required either.
-
-*A portable macOS userland — [**Darling**](https://www.darlinghq.org) running on an
-**emulated** Linux kernel, so Darwin can go where it's never gone before: Windows, the
-browser, your toaster (toaster support is on the roadmap).*
+**Run Darling's macOS userland on an emulated Linux kernel, with no real kernel, no root, and no host OS dependency — including in the browser.**
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](license.txt)
-[![Built on Boxedwine](https://img.shields.io/badge/built%20on-Boxedwine-8a2be2.svg)](https://github.com/danoon2/Boxedwine)
-[![Amplifies Darling](https://img.shields.io/badge/mission-amplify%20Darling-orange.svg)](https://www.darlinghq.org)
-[![Status: gloriously WIP](https://img.shields.io/badge/status-gloriously%20WIP-yellow.svg)](#current-state)
+[![Built on Boxedwine](https://img.shields.io/badge/built%20on-Boxedwine64-8a2be2.svg)](https://github.com/danoon2/Boxedwine)
+[![Status: WIP](https://img.shields.io/badge/status-pre--alpha-yellow.svg)](#status)
 
-</div>
+Darwin_Computa runs [**Darling**](https://github.com/darlinghq/darling) — the open-source macOS compatibility layer — on top of [**Boxedwine**](https://github.com/danoon2/Boxedwine)'s userspace Linux-kernel emulator. Because the kernel is emulated rather than required, Darling's userland (`dyld`, `libSystem`, the frameworks, `launchd`) can run on macOS, Windows, Linux, and WebAssembly without a real Linux kernel underneath.
 
----
-
-## The thirty-second pitch
-
-[**Darling**](https://github.com/darlinghq/darling) is the heroic, decade-spanning effort
-to do for macOS what Wine does for Windows: run its apps on Linux, honestly and without a
-copy of macOS in sight. It is brilliant. It is also, by necessity, **stuck to Linux** — it
-needs a real Linux kernel (historically a kernel module, these days a deep tangle of Linux
-syscalls, namespaces, and a duct-taped XNU) to give Darwin binaries the Mach traps and BSD
-syscalls they expect.
-
-[**Boxedwine**](https://github.com/danoon2/Boxedwine) had the cheekiest idea in emulation:
-*don't emulate a whole computer — emulate just the kernel.* It implements an x86 CPU and a
-**fake Linux kernel in userland**, then runs Wine on top. No VM, no hypervisor, no root, no
-real Linux. It runs Windows apps on macOS, Windows, Linux, **and in a browser tab.**
-
-**Darwin_Computa** is what happens when those two ideas have a baby and the baby is raised
-on spite and ambition:
-
-> Take Boxedwine's fake-Linux-kernel-in-userland.
-> Run **Darling** on it instead of Wine.
-> Now macOS's userland runs *literally anywhere a CPU emulator can run.*
-
-Windows → (Wine) → Boxedwine → everywhere. **macOS → (Darling) → Darwin_Computa → everywhere.**
-
-It's emulators all the way down, and we are at peace with that.
+This repository reimplements **no** macOS functionality. It runs Darling's actual binaries unmodified and supplies the kernel surface they expect. All credit for the macOS userland belongs to [Darling](https://github.com/darlinghq/darling); please support that project.
 
 ---
 
-## Wait, why does this exist? (The mission: amplify Darling)
+## Background
 
-**This project's entire reason for being is to make Darling reach further.**
+Darling provides macOS binary compatibility on Linux the way Wine does for Windows: an honest reimplementation of the userland (Cocoa, Foundation, the Objective-C runtime, `dyld`, `libSystem`) with no Apple code. It depends on a **real Linux kernel** to deliver the Mach traps, BSD syscalls, namespaces, and ptrace-based exception handling that Darwin binaries require.
 
-Darling is doing the hard, unglamorous, profoundly important work — reimplementing Cocoa,
-Foundation, the Objective-C runtime, dyld, libSystem, the lot. That work is *the* moat.
-Darwin_Computa doesn't reimplement a single line of it. We are not a competitor, a fork, or
-a "better Darling." We're a **delivery truck**:
+Boxedwine takes a different approach to portability: instead of virtualizing hardware, it implements an x86 CPU interpreter plus a **Linux kernel emulated in userspace**, and runs Wine on top. No VM, no hypervisor, no root, no real Linux — which is what lets it run Windows applications in a browser tab ([boxedwine.org](https://www.boxedwine.org)).
 
-- **Darling does the macOS.** We do the "anywhere."
-- Every Mach trap Darling expects, we answer from a fake kernel instead of a Linux one.
-- Every BSD syscall Darling makes, we serve from an interpreter instead of a host.
-- The day Darling supports a new framework, Darwin_Computa carries it to Windows and the
-  web **for free**, because we run *Darling's actual binaries* — we don't reimplement them.
+Darwin_Computa combines the two: it runs Darling on Boxedwine64's emulated kernel instead of Wine, so Darling's userland becomes portable to any target the CPU emulator runs on.
 
-If this project is ever useful, the credit is Darling's and Boxedwine's. We just removed the
-word "Linux" from the system requirements. 🚚💨
-
-> **Love Darling? [Go star it.](https://github.com/darlinghq/darling) [Go fund it.](https://github.com/sponsors/darlinghq) [Go contribute to it.](https://github.com/darlinghq/darling)**
-> Darwin_Computa is worthless without the thing it amplifies. Upstream first, always.
+This repo is a fork of **Boxedwine64** (the 64-bit-guest fork of Boxedwine); the Darwin-specific work is gated behind the additive `BOXEDWINE_DARWIN` build define so the upstream Wine path is unchanged. See [`UPSTREAM.md`](UPSTREAM.md) for the exact base commit and the upstream-merge procedure.
 
 ---
 
-## How it works (the trick)
-
-A normal macOS binary on Linux, under Darling, talks to a Linux **kernel module** for its
-Mach-y soul: it does `open("/dev/mach")` and then fires its Mach traps as `ioctl()`s against
-that device — `mach_msg`, `mach_reply_port`, `thread_self_trap`, `psynch_*`, `task_for_pid`,
-and ~80 friends. Its BSD syscalls go straight to the Linux kernel.
-
-Boxedwine already emulates that Linux kernel in userland — ELF64 loading, real threads
-(`clone`/`futex`), `fork`/`execve`, AF_UNIX sockets, `epoll`, `sendmsg` with `SCM_RIGHTS`,
-~90 syscalls — well enough to boot real Debian `wine64` to a *rendered, clickable window.*
-So the substrate Darling needs is **already sitting there**.
-
-Darwin_Computa adds the one piece that was missing:
+## Architecture
 
 ```
-   macOS app (Mach-O)
+   macOS binary (Mach-O)
         │
         ▼
-   Darling: mldr → dyld → libSystem → Cocoa/Foundation     ← Darling's real binaries
+   Darling userland: mldr → dyld → libSystem → frameworks      (Darling's real binaries)
         │                              │
-   BSD syscalls                   ioctl(/dev/mach, BASE+trap, …)   ← the Mach kernel ABI
+   BSD syscalls            Mach traps / RPC to darlingserver
         │                              │
         ▼                              ▼
-   ┌──────────────────────────────────────────────────────┐
-   │  Darwin_Computa  =  Boxedwine's fake Linux kernel      │
-   │  + an emulated /dev/mach that answers Darling's traps  │   ← the new bit (a virtual
-   │  (Mach IPC, psynch, kqueue, the commpage) in C++       │      device, not a Linux LKM)
-   └──────────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────┐
+   │  Darwin_Computa = Boxedwine64's userspace Linux kernel  │
+   │  + the host syscalls Darling/darlingserver require      │
+   │  (AF_UNIX, epoll, eventfd, timerfd, ptrace, procfs, …)  │
+   └────────────────────────────────────────────────────────┘
         │
         ▼
-   x86-64 interpreter  →  runs on macOS / Windows / Linux / WebAssembly
+   x86-64 interpreter  →  macOS / Windows / Linux / WebAssembly
 ```
 
-The kernel module that Darling needs on Linux becomes, here, **a virtual device inside the
-emulator** — no root, no LKM, no real kernel. The same `ioctl(BASE+trap)` ABI, answered in
-software. That's the whole magic trick.
+Modern Darling does **not** use the historical `/dev/mach` kernel module. It runs
+**`darlingserver`**, a userspace Linux process that acts as the macOS "kernel" (it
+embeds a port of XNU); macOS processes reach it over a Unix socket via the
+`dserver_rpc_*` protocol. This is structurally the same model as Boxedwine's own
+`wineserver`, and the emulator already implements the primitives darlingserver
+relies on (AF_UNIX + `SCM_RIGHTS`, `epoll`, `eventfd`, `timerfd`, `clone`/`futex`).
+
+The plan is therefore to run Darling's real `darlingserver` on the emulated kernel and
+fill the remaining host-syscall gaps, rather than reimplement the Mach ABI in C++. An
+earlier emulated `/dev/mach` trap device (`DARLING_MACH_API_VERSION 19`,
+`--darwin-selftest`) remains in-tree but targets the older LKM ABI and is largely
+vestigial for the current Darling release.
 
 ---
 
-## Current state
+## Status
 
-Honest status: **early, but the foundation is real and the hard part already works.**
+Pre-alpha. The emulated-Linux substrate is mature (it boots 64-bit Wine to a rendered GUI); the Darwin layer is under active bring-up. Current milestones:
 
-The emulated-Linux substrate (inherited from
-[Boxedwine64](https://github.com/danoon2/Boxedwine)) is mature — it boots real 64-bit Wine
-to a GUI. On top of that, Darwin_Computa has:
+- **Boot harness** — `--darwin-run <mach-o>` stages the Darling rootfs and runs `mldr` → `dyld` through the standard emulator path.
+- **Additive build gate** — all Darwin work is behind `BOXEDWINE_DARWIN`; the Wine path is unchanged and `--x64-selftest` passes **234/234**. `--darwin-selftest` passes **12/12**.
+- **Real Darling runs under emulation** — the Docker rootfs build stages the actual Darling release (`v0.1.20260222`); `mldr` runs through glibc/`ld.so` init, the `ptrace` startup probe, and opens/mmaps the target Mach-O.
+- **`darlingserver` boots to the `launchd` exec** — Darling's userspace kernel runs its full startup on the emulated kernel: prefix setup, Unix-socket bind, epoll loop, container-init fork, and the exec of `launchd` via `mldr vchroot`. Reaching this required implementing the syscalls the trace surfaced — `eventfd`/`timerfd` (mapped onto the emulator's existing event/timer objects), the `chown`/`chmod` families, root credentials (`setuid`/`setres*`), `/etc/passwd`, `/proc/sys/fs/nr_open`, and no-op `unshare`/`mount` (the guest VFS is already private, so no real namespaces/overlay are needed).
+- **Prefix-init walk eliminated** — darlingserver previously mirrored the entire ~375 MB prefix onto itself on every launch (`copyAndSetAttributes`, ~400k `stat`/`utimensat`/`fchownat`/`fchmodat` syscalls, minutes per boot). Selecting darlingserver's overlayfs path (a single no-op `mount`) instead of the non-overlay copy path removes the walk entirely; startup now reaches the `launchd` exec in seconds.
 
-- ✅ **The Darling boot harness** — `--darwin-run <mach-o>` stages the Darling rootfs and
-  launches `mldr` → `dyld` through the normal emulator path.
-- ✅ **`BOXEDWINE_DARWIN` build gate** — every Darwin addition is additive; the Wine path is
-  bit-for-bit untouched and its self-test still passes **234/234**.
-- ✅ **The emulated `/dev/mach` trap device** — the full ~82-trap Darling kernel ABI
-  (`DARLING_MACH_API_VERSION 19`) is wired: `open("/dev/mach")` works, the `ioctl(BASE+trap)`
-  dispatch routes to a software Mach kernel, the boot **handshake traps are answered**
-  (`get_api_version`, `task/host/thread_self`, `mach_reply_port`, …), and every trap is
-  traceable (`BW64_DEVMACHTRACE=1`). `--darwin-selftest` is **12/12**.
-- ✅ **Real Darling boots under the emulator.** The Docker rootfs build stages the actual
-  Darling release (`v0.1.20260222`), and `mldr` now runs on the emulated kernel: through
-  glibc/`ld.so` init, the `ptrace` startup probe, and all the way to **opening and mmapping
-  the target Mach-O.** (Trace it with `BW64_SYSTRACE=1`.)
-- 💡 **Architecture pivot (and a gift):** tracing the real binaries showed modern Darling
-  uses **`darlingserver`** — a userspace Linux process that *is* the macOS "kernel,"
-  reached over a **Unix socket** — not the old `/dev/mach` kernel module. That's the same
-  shape as Boxedwine's own `wineserver`, and the emulator already speaks AF_UNIX +
-  `SCM_RIGHTS` + epoll + eventfd. So the path forward is "run Darling's real
-  `darlingserver` on the fake kernel," not "reimplement Mach in C++." See
-  [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md).
-- ✅ **`darlingserver` boots on the emulated kernel — all the way to launching `launchd`.**
-  Darling's userspace macOS "kernel" (a hefty C++ binary embedding a *duct-taped XNU*) runs
-  its full startup on the fake kernel: prefix setup, **binds its Unix socket, runs its epoll
-  loop, forks the container init, and execs `launchd`.** Getting here meant implementing the
-  gaps the trace surfaced — `eventfd`/`timerfd` (wired to the emulator's existing event/timer
-  objects), the `chown` family, root creds (`setuid`/`setres*`), `/etc/passwd`, and faking
-  `unshare`/`mount` (no real namespaces/overlay needed — the guest VFS is already private).
-- 🚧 **Next:** carry `launchd` through (it boots via `mldr`+vchroot inside the prefix), then
-  the `mldr ↔ darlingserver` `dserver_rpc_*` checkin, then `/proc/<pid>/maps` + `ptrace`-backed
-  Mach-exception delivery — then a Mach-O runs to `main`.
-- 🗺️ **Then:** a trivial CLI prints headless → `bash`/`ls` → Cocoa window → a browser tab.
+**Next:** carry `launchd` through `mldr`+`vchroot` inside the prefix (current blocker: the `vchroot` helper path), then the `mldr ↔ darlingserver` `dserver_rpc_*` checkin over AF_UNIX, then `/proc/<pid>/maps` and ptrace-backed Mach-exception delivery — at which point a Mach-O reaches `main`. The longer roadmap targets a headless CLI, then `bash`/`ls`, then a Cocoa window, then WebAssembly.
 
-See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap (A→I, shamelessly
-modeled on Boxedwine64's own bring-up log), [`UPSTREAM.md`](UPSTREAM.md) for exactly which
-Boxedwine64 commit this was forked from and how to merge upstream fixes, and
-[`docs/BOXEDWINE64.md`](docs/BOXEDWINE64.md) for the deep technical writeup of the
-emulated-Linux substrate we build on.
+See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap and [`docs/BOXEDWINE64.md`](docs/BOXEDWINE64.md) for the emulated-Linux substrate.
 
 ---
 
-## Build & run (macOS arm64, dev path)
+## Build and run (macOS arm64)
 
 ```sh
 cd project/mac-xcode/Boxedwine
@@ -164,78 +86,51 @@ xcodebuild -project Boxedwine.xcodeproj -scheme Boxedwine \
 
 BW=build_darwin/Build/Products/Debug/Boxedwine.app/Contents/MacOS/Boxedwine
 
-"$BW" --x64-selftest        # the inherited substrate (should print 234/234)
-"$BW" --darwin-selftest     # the Darwin /dev/mach trap layer
-"$BW" --darwin-run /usr/bin/hello   # boot a Mach-O under emulated Darling
+"$BW" --x64-selftest                  # inherited substrate; expects 234/234
+"$BW" --darwin-selftest               # Darwin /dev/mach trap layer; expects 12/12
+"$BW" --darwin-run /usr/bin/hello     # boot a Mach-O under emulated Darling
 ```
 
-The Darling rootfs (Darling's actual amd64 userland, staged into a zip the same way
-Boxedwine stages a Wine prefix) is built via Docker — see
-[`tools/rootfs-darling/`](tools/rootfs-darling/). You build it once and then it runs on a
-machine that has never heard of Linux.
+The `Boxedwine` / Debug scheme defines `BOXEDWINE_GUEST_X64=1` and `BOXEDWINE_DARWIN=1`. Sources live in an Xcode synchronized folder group, so new files under `source/` compile automatically without project edits.
+
+The Darling rootfs (Darling's amd64 userland, staged into a zip the same way Boxedwine stages a Wine prefix) is built via Docker; see [`tools/rootfs-darling/`](tools/rootfs-darling/). It is built once on a Linux-capable host and then runs anywhere.
+
+### Tracing
+
+| Variable | Effect |
+| --- | --- |
+| `BW64_SYSTRACE=1` | Trace emulated Linux syscalls |
+| `BW64_DEVMACHTRACE=1` | Trace Mach traps through the `/dev/mach` device |
+| `BW64_DIRTRACE=1` | Trace directory reads (`getdents64`) |
+
+Driver script for the darlingserver bring-up: [`tools/run_darling_cli.sh`](tools/run_darling_cli.sh).
 
 ---
 
-## FAQ for the reasonably skeptical
+## Project layout
 
-**Is this just a worse Darling?**
-No — it's *the same* Darling, wearing a jetpack. We run Darling's real binaries. If Darling
-can't do something, neither can we. If Darling learns to do something, we get it for free.
-
-**Why not just run Darling in a VM / WSL / a Docker container?**
-Those need a real Linux kernel (and often root, and a Linux to begin with). The point of the
-Boxedwine approach is **no real kernel at all** — which is the only way you get the browser,
-locked-down corporate Windows boxes, and weird embedded targets. A VM can't run in a `<canvas>`.
-
-**Is it fast?**
-It is an interpreter emulating an x86-64 CPU running a macOS compatibility layer running
-your app. Speed is a Phase H problem. Manage your expectations and bring a snack.
-
-**macOS GUI apps in a browser tab — for real?**
-That's the north star, exactly like [boxedwine.org](https://www.boxedwine.org) does for
-Windows apps today. We're not there yet. We're building toward it in the open.
-
-**Did you ship a single line of macOS reimplementation?**
-Not one. That's Darling's genius and Darling's glory. We ship a fake kernel and a delivery
-truck. [Go support the people who built the actual thing.](https://github.com/darlinghq/darling)
+| Path | Contents |
+| --- | --- |
+| `source/kernel/syscall64.cpp` | x86-64 Linux syscall dispatch (the Darwin-facing host surface) |
+| `source/sdl/main.cpp` | Entry points, `--darwin-run` / selftest harnesses, `setupDarwinRun()` |
+| `source/io/` | Emulated VFS, zip-backed rootfs (`FsZip`), path resolution |
+| `tools/rootfs-darling/` | Docker tooling that stages the Darling userland into a rootfs zip |
+| `docs/PLAN_DARWIN.md` | Phased bring-up roadmap and design notes |
+| `docs/BOXEDWINE64.md` | Technical writeup of the emulated-Linux substrate |
+| `UPSTREAM.md` | Base Boxedwine64 commit and upstream-merge procedure |
 
 ---
 
-## Standing on the shoulders of giants
+## Relationship to upstream projects
 
-Darwin_Computa is a thin idea on top of an enormous amount of other people's brilliance:
-
-- **[Darling](https://github.com/darlinghq/darling)** by the DarlingHQ team — the macOS
-  userland we run and the reason this project exists. **This is the project we exist to
-  amplify.** Please support it.
-- **[Boxedwine](https://github.com/danoon2/Boxedwine)** by **danoon2** — the userland
-  CPU-and-fake-kernel emulator that makes "no real OS required" possible. The technical
-  parent of this repo.
-- **Boxedwine64** — the 64-bit-guest fork this is copied from (see [`UPSTREAM.md`](UPSTREAM.md)).
-- **[Wine](https://www.winehq.org)** — for proving the whole "honest reimplementation, no
-  pirated OS" philosophy decades ago, and for being the spiritual sibling of Darling.
-- **Apple's open-source [XNU](https://github.com/apple-oss-distributions/xnu) / Darwin** —
-  the actual kernel ABI everyone here is politely impersonating.
-
-If you're going to spend your stars and your dollars on one project in this list,
-**make it [Darling](https://github.com/darlinghq/darling).** We mean it.
+- **[Darling](https://github.com/darlinghq/darling)** — the macOS userland this project runs. Darwin_Computa reimplements none of it and exists only to make it portable. [Support Darling.](https://github.com/sponsors/darlinghq)
+- **[Boxedwine](https://github.com/danoon2/Boxedwine)** (by danoon2) — the userspace CPU-and-kernel emulator this is built on.
+- **Boxedwine64** — the 64-bit-guest fork this repository is derived from (see [`UPSTREAM.md`](UPSTREAM.md)).
+- **[Wine](https://www.winehq.org)** and Apple's open-source [XNU/Darwin](https://github.com/apple-oss-distributions/xnu) — the prior art and the kernel ABI being implemented, respectively.
 
 ---
 
 ## License
 
-GPL v2, inherited from Boxedwine — see [`license.txt`](license.txt). Darling, dyld,
-libSystem, and friends carry their own (mostly APSL/permissive) licenses; this repo contains
-**no** Apple code and **no** Darling code — the Darling userland is fetched and staged at
-build time, never vendored.
-
----
-
-<div align="center">
-
-*Built with reverence for Darling, larceny of Boxedwine's best idea, and the firm belief
-that "you need a Mac to run Mac apps" was always more of a suggestion.*
-
-🍎 → 🐧 → 🪟🌐🐧🍏 &nbsp;&nbsp; **Darwin, unstuck.**
-
-</div>
+GPL v2, inherited from Boxedwine — see [`license.txt`](license.txt). This repository contains **no** Apple or Darling source; the Darling userland is fetched and staged at build time, never vendored. Darling, `dyld`, `libSystem`, and related components retain their own licenses.
+```
