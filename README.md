@@ -118,9 +118,14 @@ to a GUI. On top of that, Darwin_Computa has:
   launches `mldr` → `dyld` through the normal emulator path.
 - ✅ **`BOXEDWINE_DARWIN` build gate** — every Darwin addition is additive; the Wine path is
   bit-for-bit untouched and its self-test still passes **234/234**.
-- ✅ **A self-test hook** — `--darwin-selftest` (the CI tripwire for the `/dev/mach` layer).
-- 🚧 **The `/dev/mach` trap device** — Mach IPC + psynch + the commpage (in progress; this
-  is the spike that gets `dyld`/libSystem past the kernel handshake).
+- ✅ **The emulated `/dev/mach` trap device** — the full ~82-trap Darling kernel ABI
+  (`DARLING_MACH_API_VERSION 19`) is wired: `open("/dev/mach")` works, the `ioctl(BASE+trap)`
+  dispatch routes to a software Mach kernel, the boot **handshake traps are answered**
+  (`get_api_version`, `task/host/thread_self`, `mach_reply_port`, …), and every trap is
+  traceable (`BW64_DEVMACHTRACE=1`). `--darwin-selftest` is **12/12**.
+- 🚧 **Mach IPC + psynch + the commpage** — `mach_msg`, the pthread sync traps (on the
+  emulator's futex), `kqueue`/`kevent` (on epoll), and `vchroot`. This is the next spike:
+  getting `dyld`/libSystem all the way through init.
 - 🗺️ **Then:** a trivial Mach-O prints headless → `bash`/`ls` → Cocoa window → a browser tab.
 
 See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap (A→I, shamelessly
