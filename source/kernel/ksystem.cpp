@@ -68,6 +68,9 @@ U32 KSystem::wineMajorVersion;
 bool KSystem::disableHideCursor = false;
 bool KSystem::forceRelativeMouse = false;
 bool KSystem::cacheReads = false;
+#ifdef BOXEDWINE_DARWIN
+bool KSystem::darwinMode = false;
+#endif
 BString KSystem::showWindowTimestamp;
 volatile int KSystem::bootProgressPercent = -1;
 BString KSystem::bootProgressLabel;

@@ -15,6 +15,8 @@
 #include "cpu64.h"
 #include "kmemory64.h"
 #include "ksocket.h"
+#include "kevent.h"  // syscall_eventfd2 (shared with the 32-bit path)
+#include "ktimer.h"  // KTimer for 64-bit timerfd
 #include <thread>   // std::this_thread::yield() for sched_yield
 #include <mutex>    // std::recursive_mutex for BW64_SERIAL_TEARDOWN
 #include "kunixsocket.h"
@@ -108,6 +110,10 @@
 #define X64_SYS_ptrace            101
 #define X64_SYS_mount             165
 #define X64_SYS_unshare           272
+#define X64_SYS_chown             92
+#define X64_SYS_fchown            93
+#define X64_SYS_lchown            94
+#define X64_SYS_fchownat          260
 #define X64_SYS_gettid            186
 #define X64_SYS_futex             202
 #define X64_SYS_set_tid_address   218
@@ -161,6 +167,10 @@
 #define X64_SYS_rseq              334
 #define X64_SYS_clone3            435
 #define X64_SYS_eventfd2          290
+#define X64_SYS_eventfd           284
+#define X64_SYS_timerfd_create    283
+#define X64_SYS_timerfd_settime   286
+#define X64_SYS_timerfd_gettime   287
 #define X64_SYS_epoll_create1     291
 #define X64_SYS_epoll_create      213
 #define X64_SYS_epoll_ctl         233
@@ -2655,6 +2665,10 @@ static const char* x64SyscallName(U64 nr) {
         case 102: return "getuid";
         case 165: return "mount";
         case 272: return "unshare";
+        case 92: return "chown";
+        case 93: return "fchown";
+        case 94: return "lchown";
+        case 260: return "fchownat";
         case 105: return "setuid";
         case 106: return "setgid";
         case 201: return "time";
@@ -2703,6 +2717,10 @@ static const char* x64SyscallName(U64 nr) {
         case 270: return "pselect6";
         case 273: return "set_robust_list";
         case 290: return "eventfd2";
+        case 284: return "eventfd";
+        case 283: return "timerfd_create";
+        case 286: return "timerfd_settime";
+        case 287: return "timerfd_gettime";
         case 291: return "epoll_create1";
         case 293: return "pipe2";
         case 302: return "prlimit64";
@@ -2814,6 +2832,17 @@ void ksyscall64(CPU64* cpu) {
             break;
         case X64_SYS_arch_prctl:
             ret = sys_arch_prctl64(cpu, a1, a2);
+            break;
+        case X64_SYS_chown:
+        case X64_SYS_fchown:
+        case X64_SYS_lchown:
+        case X64_SYS_fchownat:
+            // chown family. The emulated FS models a single user and tracks no
+            // ownership, so changing owner is a meaningless but harmless
+            // operation — accept it. darlingserver chowns prefix files (e.g.
+            // mldr) during setup and treats an error as fatal, so a real -ENOSYS
+            // here aborts the server; return success instead.
+            ret = 0;
             break;
         case X64_SYS_unshare:
             // unshare(flags). Darling's launcher unshares mount/PID/UTS/IPC
@@ -3708,10 +3737,18 @@ void ksyscall64(CPU64* cpu) {
         case X64_SYS_geteuid:
         case X64_SYS_getgid:
         case X64_SYS_getegid:
+#ifdef BOXEDWINE_DARWIN
+            // Darling's darlingserver (the macOS "kernel" process) requires
+            // uid/gid 0 and exits otherwise. In Darwin mode report root.
+            if (KSystem::darwinMode) { ret = 0; break; }
+#endif
             ret = 1000; // pretend uid/gid 1000
             break;
         case X64_SYS_setuid:
         case X64_SYS_setgid:
+#ifdef BOXEDWINE_DARWIN
+            if (KSystem::darwinMode) { ret = 0; break; } // root: accept any
+#endif
             // We model exactly one user (uid/gid 1000). Tools like coreutils
             // ls/id call setuid/setgid to drop privileges at startup; accept
             // any request to set our own id and reject others with EPERM, the
@@ -3725,13 +3762,25 @@ void ksyscall64(CPU64* cpu) {
             // bytes); a NULL pointer would be EFAULT but wine always passes
             // valid stack slots.
             if (!a1 || !a2 || !a3) { ret = (U64)-K_EFAULT; break; }
-            cpu->memory->writed(a1, 1000);
-            cpu->memory->writed(a2, 1000);
-            cpu->memory->writed(a3, 1000);
+            {
+                U32 id = 1000;
+#ifdef BOXEDWINE_DARWIN
+                if (KSystem::darwinMode) id = 0; // root
+#endif
+                cpu->memory->writed(a1, id);
+                cpu->memory->writed(a2, id);
+                cpu->memory->writed(a3, id);
+            }
             ret = 0;
             break;
         case 117: // setresuid(ruid, euid, suid)
         case 119: // setresgid(rgid, egid, sgid)
+#ifdef BOXEDWINE_DARWIN
+            // In Darwin mode we model root (see getuid), and root may set any
+            // id. darlingserver temp-drops then regains privileges around prefix
+            // setup; accept every change so that dance succeeds.
+            if (KSystem::darwinMode) { ret = 0; break; }
+#endif
             // Accept setting our own id (1000 or -1 = "unchanged"); reject any
             // attempt to switch to a different user with EPERM, mirroring an
             // unprivileged process. -1 (0xffffffff) means leave that id alone.
@@ -4029,11 +4078,77 @@ void ksyscall64(CPU64* cpu) {
                 ret = (U64)-K_ENOSYS;
             }
             break;
+        case X64_SYS_eventfd:
         case X64_SYS_eventfd2:
-            // Used by glibc for thread-pool wakeups, by GLib mainloop, etc.
-            // Real impl needs an FD allocator that can wire poll/read.
-            ret = (U64)-K_ENOSYS;
+            // eventfd(initval, flags) / eventfd2 — a counter fd that is readable/
+            // writable/pollable, used for epoll wakeups. Darling's darlingserver
+            // REQUIRES it ("Failed to create eventfd for on-demand epoll
+            // wakeups") and throws std::system_error on -ENOSYS. Reuse the
+            // existing KEvent implementation (source/kernel/kevent.cpp), the same
+            // one the 32-bit path uses, which wires read/write/poll correctly.
+            if (!cpu->thread) { ret = (U64)-K_ENOSYS; break; }
+            {
+                U32 flags = (nr == X64_SYS_eventfd2) ? (U32)a2 : 0;
+                U32 r = syscall_eventfd2(cpu->thread, (U32)a1, flags);
+                ret = (U64)(S64)(S32)r;
+            }
             break;
+        case X64_SYS_timerfd_create:
+            // timerfd_create(clockid, flags) — scalar args, route to the shared
+            // KProcess impl (creates a KTimer-backed fd). darlingserver needs it
+            // for timed epoll wakeups ("Failed to create timer descriptor").
+            if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+            ret = (U64)(S64)(S32)cpu->thread->process->timerfd_create((U32)a1, (U32)a2);
+            break;
+        case X64_SYS_timerfd_settime: {
+            // timerfd_settime(fd, flags, new*, old*). The struct is a 64-bit
+            // itimerspec { it_interval{tv_sec u64, tv_nsec u64}, it_value{...} }
+            // (4 x 8 bytes) — NOT the 32-bit layout the KProcess helper reads —
+            // so marshal it here against cpu->memory (KMemory64) and drive the
+            // KTimer directly via setTimes(microInterval, microNextTimer).
+            if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+            KFileDescriptorPtr fd = cpu->thread->process->getFileDescriptor((FD)(S32)a1);
+            if (!fd) { ret = (U64)-K_EBADF; break; }
+            std::shared_ptr<KTimer> timer = std::dynamic_pointer_cast<KTimer>(fd->kobject);
+            if (!timer) { ret = (U64)-K_EINVAL; break; }
+            if (!a3) { ret = (U64)-K_EFAULT; break; }
+            if (a4) { // write old value (itimerspec64)
+                U64 microInterval = timer->getMicroInterval();
+                U64 microNext = timer->getMicroNextTimer();
+                cpu->memory->writeq(a4,      microInterval / 1000000);
+                cpu->memory->writeq(a4 + 8,  (microInterval % 1000000) * 1000);
+                U64 now = KSystem::getSystemTimeAsMicroSeconds();
+                S64 diff = microNext ? (S64)microNext - (S64)now : 0;
+                if (diff < 0) diff = 0;
+                cpu->memory->writeq(a4 + 16, (U64)diff / 1000000);
+                cpu->memory->writeq(a4 + 24, ((U64)diff % 1000000) * 1000);
+            }
+            U64 interval = cpu->memory->readq(a3) * 1000000 + cpu->memory->readq(a3 + 8) / 1000;
+            U64 next     = cpu->memory->readq(a3 + 16) * 1000000 + cpu->memory->readq(a3 + 24) / 1000;
+            if ((a2 & 1) == 0 && next) next += KSystem::getSystemTimeAsMicroSeconds(); // !ABSTIME
+            timer->setTimes(interval, next);
+            ret = 0;
+            break;
+        }
+        case X64_SYS_timerfd_gettime: {
+            if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+            KFileDescriptorPtr fd = cpu->thread->process->getFileDescriptor((FD)(S32)a1);
+            if (!fd) { ret = (U64)-K_EBADF; break; }
+            std::shared_ptr<KTimer> timer = std::dynamic_pointer_cast<KTimer>(fd->kobject);
+            if (!timer) { ret = (U64)-K_EINVAL; break; }
+            if (!a2) { ret = (U64)-K_EFAULT; break; }
+            U64 microInterval = timer->getMicroInterval();
+            U64 microNext = timer->getMicroNextTimer();
+            cpu->memory->writeq(a2,     microInterval / 1000000);
+            cpu->memory->writeq(a2 + 8, (microInterval % 1000000) * 1000);
+            U64 now = KSystem::getSystemTimeAsMicroSeconds();
+            S64 diff = microNext ? (S64)microNext - (S64)now : 0;
+            if (diff < 0) diff = 0;
+            cpu->memory->writeq(a2 + 16, (U64)diff / 1000000);
+            cpu->memory->writeq(a2 + 24, ((U64)diff % 1000000) * 1000);
+            ret = 0;
+            break;
+        }
         case X64_SYS_epoll_create:
         case X64_SYS_epoll_create1:
             // epoll_create(size) / epoll_create1(flags) — allocate an epoll set.

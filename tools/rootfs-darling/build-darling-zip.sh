@@ -150,6 +150,15 @@ fi
 # Writable scratch dirs a Darwin/Linux rootfs needs.
 mkdir -p "$STAGE/tmp" "$STAGE/var/tmp" "$STAGE/home/username" "$STAGE/run/user/1000"
 
+# /etc/passwd + group + nsswitch: darlingserver calls getpwuid(0) during prefix
+# setup ("Cannot determine your user name") and must resolve a root entry;
+# nsswitch "files" keeps NSS from trying a nonexistent nscd socket. Provide a
+# minimal set (root + the default unprivileged user).
+mkdir -p "$STAGE/etc"
+printf "root:x:0:0:root:/root:/bin/bash\nusername:x:1000:1000:username:/home/username:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n" > "$STAGE/etc/passwd"
+printf "root:x:0:\nusername:x:1000:\nnogroup:x:65534:\n" > "$STAGE/etc/group"
+printf "passwd: files\ngroup: files\nhosts: files dns\n" > "$STAGE/etc/nsswitch.conf"
+
 echo "--- staged tree ready ---"
 du -sh "$STAGE" || true
 '

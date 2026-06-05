@@ -105,6 +105,13 @@ public:
     static bool disableHideCursor;
     static bool forceRelativeMouse;
     static bool cacheReads;
+#ifdef BOXEDWINE_DARWIN
+    // Darwin_Computa: true when booting Darling (--darwin-run). Darling's
+    // darlingserver legitimately requires uid/gid 0 (it is the macOS "kernel"
+    // process), so getuid/getgid report 0 in this mode instead of the default
+    // 1000 the wine path uses. Set in setupDarwinRun (main.cpp).
+    static bool darwinMode;
+#endif
     static bool useF64;
     static U32 pageSize;
     static bool canJitUse4KPage;

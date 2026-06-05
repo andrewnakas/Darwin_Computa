@@ -242,6 +242,7 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
         printf("--darwin-run: usage: --darwin-run <guest-macho-path> [args...]\n");
         return false;
     }
+    KSystem::darwinMode = true;   // Darling needs uid/gid 0 (darlingserver)
 
     BString resourceDir = KNativeSystem::getLocalDirectory();
     BString rf = resourceDir.stringByApppendingPath("rootfs-darling");
@@ -257,6 +258,28 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
     a.envValues.push_back(BString::copy("HOME=/home/username"));
     a.envValues.push_back(BString::copy("USER=username"));
     a.envValues.push_back(BString::copy("DISPLAY=:0"));
+    // The emulated kernel gives each guest a private VFS, so Darling's overlayfs
+    // prefix is unnecessary; skip it. DPREFIX is the Darwin prefix root inside
+    // the rootfs (the staged Darwin "/").
+    a.envValues.push_back(BString::copy("DARLING_NOOVERLAYFS=1"));
+    a.envValues.push_back(BString::copy("DPREFIX=/darling-prefix"));
+
+    // If the target is darlingserver itself, run it DIRECTLY (it is a Linux ELF,
+    // not a Mach-O) with the 6-arg contract its main() requires:
+    //   argv = darlingserver <prefix> <uid> <gid> <lifetime-pipe-fd> <fixperms>
+    // (argc>=6 or it prints "not meant to be started manually"; it also requires
+    // uid/gid 0 — provided by KSystem::darwinMode). This is how the bring-up
+    // harness drives the server independently of mldr. pipe fd -1 = none.
+    BString first = guestArgs[0];
+    if (first.endsWith("darlingserver")) {
+        a.addArg(first);
+        a.addArg(BString::copy("/darling-prefix"));   // argv[1] prefix
+        a.addArg(BString::copy("0"));                  // argv[2] originalUID
+        a.addArg(BString::copy("0"));                  // argv[3] originalGID
+        a.addArg(BString::copy("-1"));                 // argv[4] lifetime pipe fd
+        a.addArg(BString::copy("0"));                  // argv[5] fix_permissions
+        return true;
+    }
 
     const char* mldr = std::getenv("DARWIN_MLDR");
     a.addArg(BString::copy(mldr && mldr[0] ? mldr : "/usr/libexec/darling/mldr"));
