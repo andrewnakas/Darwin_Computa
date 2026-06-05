@@ -180,6 +180,8 @@
 #define X64_SYS_select            23
 #define X64_SYS_chmod             90
 #define X64_SYS_fchmod            91
+#define X64_SYS_fchmodat          268
+#define X64_SYS_fchmodat2         452
 #define X64_SYS_clone             56
 #define X64_SYS_fork              57
 #define X64_SYS_vfork             58
@@ -2669,6 +2671,8 @@ static const char* x64SyscallName(U64 nr) {
         case 93: return "fchown";
         case 94: return "lchown";
         case 260: return "fchownat";
+        case 268: return "fchmodat";
+        case 452: return "fchmodat2";
         case 105: return "setuid";
         case 106: return "setgid";
         case 201: return "time";
@@ -4265,10 +4269,13 @@ void ksyscall64(CPU64* cpu) {
             break;
         case X64_SYS_chmod:
         case X64_SYS_fchmod:
+        case X64_SYS_fchmodat:
+        case X64_SYS_fchmodat2:
             // No-op success: rootfs is effectively read-only for our purpose
             // and glibc's installer paths frequently call chmod on temp
             // files. Returning 0 avoids spurious install-time failures
-            // without actually touching anything.
+            // without actually touching anything. darlingserver chmods prefix
+            // files during setup (via fchmodat) and treats failure as fatal.
             ret = 0;
             break;
         case X64_SYS_gettimeofday: {

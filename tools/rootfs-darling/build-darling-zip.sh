@@ -145,7 +145,23 @@ done
 echo "--- copying Darling Darwin prefix at $PREFIX (this is the big one) ---"
 if [ -d "$PREFIX" ]; then
     mkdir -p "$STAGE$PREFIX"
-    cp -aL "$PREFIX/." "$STAGE$PREFIX/" 2>/dev/null || true
+    # Copy the Darwin prefix with tar, EXCLUDING Volumes/DarlingEmulatedDrive:
+    # on a real install the `darling` wrapper bind-mounts the host Linux "/"
+    # there, so in the image it is a full duplicate Linux root (bin, etc, lib,
+    # and even a recursive copy of our own dist/stage) — copying it verbatim
+    # balloons the zip and, worse, the recursion made cp error out and silently
+    # drop the real nested mldr/launchd. We recreate the needed Linux view from
+    # our own rootfs, so the prefix only needs its Darwin content. proc/dev/sys
+    # are kernel-virtual; skip them too.
+    ( cd "$PREFIX" && tar -ch \
+        --exclude='./Volumes/DarlingEmulatedDrive' \
+        --exclude='./proc' --exclude='./dev' --exclude='./sys' \
+        . 2>/dev/null ) | ( cd "$STAGE$PREFIX" && tar -x 2>/dev/null ) || true
+    # Sanity: the two binaries darlingserver execs MUST be present.
+    [ -e "$STAGE$PREFIX/usr/libexec/darling/mldr" ] || \
+        echo "WARNING: nested mldr missing from staged prefix!" >&2
+    [ -e "$STAGE$PREFIX/sbin/launchd" ] || \
+        echo "WARNING: launchd missing from staged prefix!" >&2
     # Convenience symlink for the --darwin-run CLI / DYLD_ROOT_PATH examples.
     ln -sfn "$PREFIX" "$STAGE/darling-prefix" 2>/dev/null || true
 else
