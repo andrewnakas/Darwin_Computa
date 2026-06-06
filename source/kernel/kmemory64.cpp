@@ -536,8 +536,10 @@ void KMemory64::memcpyToGuest(U64 dstGuest, const void* src, U64 len) {
         U64 v = 0;
         U64 within = (g_watchAddr >= dstGuest) ? (g_watchAddr - dstGuest) : 0;
         if (within + 8 <= len) std::memcpy(&v, (const U8*)src + within, 8);
-        klog_fmt("BW64_WATCH: pid=%d write to 0x%llx (watch 0x%llx) len=%llu first8=0x%llx",
+        KThread* wt = KThread::currentThread();
+        klog_fmt("BW64_WATCH: pid=%d tid=%d write to 0x%llx (watch 0x%llx) len=%llu first8=0x%llx",
                  (int)(process ? process->id : -1),
+                 (int)(wt ? wt->id : -1),
                  (unsigned long long)dstGuest, (unsigned long long)g_watchAddr,
                  (unsigned long long)len, (unsigned long long)v);
     }

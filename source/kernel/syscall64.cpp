@@ -20,6 +20,7 @@
 #include "ktimer.h"  // KTimer for 64-bit timerfd
 #include <thread>   // std::this_thread::yield() for sched_yield
 #include <mutex>    // std::recursive_mutex for BW64_SERIAL_TEARDOWN
+#include <set>      // BW64_BLOCKDUMP dedup set
 #include "kunixsocket.h"
 #include "kpoll.h"
 #include "ripSampler.h"
@@ -2980,10 +2981,142 @@ void ksyscall64(CPU64* cpu) {
         static int tracePid = tracePidEnv ? atoi(tracePidEnv) : -1;
         int myPid = (int)(cpu->thread ? cpu->thread->process->id : -1);
         if (getenv("BW64_SYSTRACE") || (tracePid >= 0 && myPid == tracePid)) {
-            klog_fmt("SYS64 [pid=%d] #%llu %s (a1=0x%llx a2=0x%llx a3=0x%llx)",
-                     myPid, (unsigned long long)nr, x64SyscallName(nr),
+            klog_fmt("SYS64 [pid=%d tid=%d] #%llu %s (a1=0x%llx a2=0x%llx a3=0x%llx) rip=0x%llx",
+                     myPid, (int)(cpu->thread ? cpu->thread->id : -1),
+                     (unsigned long long)nr, x64SyscallName(nr),
                      (unsigned long long)a1, (unsigned long long)a2,
-                     (unsigned long long)a3);
+                     (unsigned long long)a3, (unsigned long long)cpu->rip);
+        }
+    }
+
+    // BW64_BLOCKDUMP: record entry so a thread parked inside a blocking syscall
+    // (mach_msg recvmsg / futex / sched_yield) is visible to the periodic dumper
+    // below. Cheap unconditional book-keeping (two stores); the dump itself is
+    // env-gated and throttled. inSyscall64 is cleared just before we return RAX.
+    if (cpu->thread) {
+        cpu->thread->lastSyscall64 = (U32)nr;
+        cpu->thread->lastSyscallRip64 = cpu->rip;
+        cpu->thread->inSyscall64 = true;
+    }
+    // BW64_BLOCKDUMP: log the EXACT entry into a blocking syscall (recvmsg /
+    // futex / ppoll / pselect / poll / select) per thread, deduplicated on
+    // (tid, scRip). A thread parked in mach_msg MACH_RCV blocks in recvmsg; one
+    // in an os_unfair_lock blocks in futex. The scRip then maps (offline) to the
+    // launchd / libdispatch / libxpc function so we know exactly where it idled.
+    if (getenv("BW64_BLOCKDUMP") && cpu->thread) {
+        U32 base = (U32)nr;
+        bool blocking = (base == 47 /*recvmsg*/ || base == 202 /*futex*/ ||
+                         base == 271 /*ppoll*/ || base == 270 /*pselect6*/ ||
+                         base == 7 /*poll*/ || base == 23 /*select*/ ||
+                         base == 281 /*epoll_pwait*/ || base == 232 /*epoll_wait*/ ||
+                         // job_start/runtime_fork proxies: launchd does
+                         // socketpair(execspair) right before fork() to spawn a
+                         // job. Catching these (per tid/rip) proves whether the
+                         // System bootstrapper's job_start path is reached at all.
+                         base == 53 /*socketpair*/ || base == 56 /*clone*/ ||
+                         base == 435 /*clone3*/ || base == 57 /*fork*/ ||
+                         base == 59 /*execve*/);
+        if (blocking) {
+            static std::mutex bdMutex;
+            static std::set<U64> seen;
+            U64 key = ((U64)(cpu->thread->id) << 40) ^ cpu->rip;
+            bool fresh;
+            { std::lock_guard<std::mutex> lk(bdMutex); fresh = seen.insert(key).second; }
+            if (fresh) {
+                klog_fmt("BLOCKDUMP pid=%d tid=%d ENTER #%u(%s) scRip=0x%llx a1=0x%llx",
+                         (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                         (int)cpu->thread->id, base, x64SyscallName(base),
+                         (unsigned long long)cpu->rip, (unsigned long long)a1);
+                // Walk the RBP chain so the launchd caller (launchd_runtime vs
+                // jobmgr_init vs ...) is visible — the 0x1xxxxxxxx frames map
+                // directly to launchd offsets, the 0x8xxxxxxxx to the dylibs.
+                if (cpu->memory) {
+                    U64 rbp = cpu->reg[X64_RBP].u64; U64 fr[10]; int nf = 0;
+                    for (int i = 0; i < 10 && rbp >= 0x1000; i++) {
+                        fr[nf++] = cpu->memory->readq(rbp + 8);
+                        U64 nx = cpu->memory->readq(rbp);
+                        if (nx <= rbp) break; rbp = nx;
+                    }
+                    klog_fmt("BLOCKDUMP   bt tid=%d [%llx %llx %llx %llx %llx %llx %llx %llx]",
+                             (int)cpu->thread->id,
+                             (unsigned long long)(nf>0?fr[0]:0),(unsigned long long)(nf>1?fr[1]:0),
+                             (unsigned long long)(nf>2?fr[2]:0),(unsigned long long)(nf>3?fr[3]:0),
+                             (unsigned long long)(nf>4?fr[4]:0),(unsigned long long)(nf>5?fr[5]:0),
+                             (unsigned long long)(nf>6?fr[6]:0),(unsigned long long)(nf>7?fr[7]:0));
+                    // The RBP chain often runs through GCD/dispatch which doesn't
+                    // chain back to launchd. Also SCAN the raw stack for the
+                    // first few launchd return addresses (0x100000000..0x101000000)
+                    // — those name the launchd.c-level caller (jobmgr_init vs
+                    // launchd_runtime vs the update_thread pthread_create), telling
+                    // us how far launchd's main() actually got.
+                    U64 sp = cpu->reg[X64_RSP].u64; U64 lfr[6]; int lf = 0;
+                    for (int i = 0; i < 512 && lf < 6; i++) {
+                        U64 w = cpu->memory->readq(sp + (U64)i * 8);
+                        if (w >= 0x100000000ULL && w < 0x101000000ULL) lfr[lf++] = w;
+                    }
+                    klog_fmt("BLOCKDUMP   launchdFrames tid=%d [%llx %llx %llx %llx %llx %llx]",
+                             (int)cpu->thread->id,
+                             (unsigned long long)(lf>0?lfr[0]:0),(unsigned long long)(lf>1?lfr[1]:0),
+                             (unsigned long long)(lf>2?lfr[2]:0),(unsigned long long)(lf>3?lfr[3]:0),
+                             (unsigned long long)(lf>4?lfr[4]:0),(unsigned long long)(lf>5?lfr[5]:0));
+                }
+            }
+        }
+    }
+
+    // BW64_YIELDSPIN: launchd's main thread (TID 27) busy-spins on a Darwin
+    // lock right after jobmgr_init — its swtch_pri/thread_switch yields lower
+    // to the HOST glibc sched_yield (RIP lands in libc, not a Darwin dylib),
+    // so the only meaningful frame is the deepest Darwin return address on the
+    // stack. Log tid + rip + the first Darwin (0x8xxxxxxxx) stack frames once
+    // per 4096 yields, and symbolize the spin against the dyld image list. The
+    // spin's PEER (TID 29) blocks in mach_msg recvmsg = a two-thread deadlock.
+    if (getenv("BW64_YIELDSPIN") && nr == 24 /*sched_yield*/) {
+        static U64 yieldCount = 0;
+        if ((yieldCount++ & 0xFFF) == 0) {
+            // The spin chain is: caller -> libpthread sched_yield -> swtch_pri ->
+            // __linux_sched_yield -> SYSCALL. libpthread/libplatform frames keep
+            // a frame pointer, so an RBP-CHAIN walk yields the EXACT caller list
+            // (far more reliable than scanning the stack for in-range words,
+            // which picks up stale data — the bug in the old version). For each
+            // frame: saved-RBP @ [rbp], return-addr @ [rbp+8].
+            U64 rbp = cpu->reg[X64_RBP].u64;
+            U64 frames[10]; int nf = 0;
+            if (cpu->memory) {
+                for (int i = 0; i < 10 && rbp >= 0x1000; i++) {
+                    U64 ret = cpu->memory->readq(rbp + 8);
+                    frames[nf++] = ret;
+                    U64 next = cpu->memory->readq(rbp);
+                    if (next <= rbp) break;       // not ascending -> end of chain
+                    rbp = next;
+                }
+            }
+            // The mldr __darling_thread_create spin tests args.pth at [rbp-0x58]
+            // (cmpq $0,-0x58(%rbp); je out; call sched_yield; jmp). Read it so we
+            // can tell "child cleared pth but parent can't see it" (coherence bug)
+            // from "child never cleared pth" (child stuck before line 247).
+            U64 pthAddr = cpu->reg[X64_RBP].u64 - 0x58;
+            U64 pthVal = cpu->memory ? cpu->memory->readq(pthAddr) : 0xdead;
+            klog_fmt("YIELDSPIN: pthAddr=0x%llx pthVal=0x%llx",
+                     (unsigned long long)pthAddr, (unsigned long long)pthVal);
+            klog_fmt("YIELDSPIN: pid=%d tid=%d count=%llu rip=0x%llx rbp=0x%llx nf=%d [%llx %llx %llx %llx %llx %llx]",
+                     (int)(cpu->thread ? cpu->thread->process->id : -1),
+                     (int)(cpu->thread ? cpu->thread->id : -1),
+                     (unsigned long long)yieldCount, (unsigned long long)cpu->rip,
+                     (unsigned long long)cpu->reg[X64_RBP].u64, nf,
+                     (unsigned long long)(nf>0?frames[0]:0),
+                     (unsigned long long)(nf>1?frames[1]:0),
+                     (unsigned long long)(nf>2?frames[2]:0),
+                     (unsigned long long)(nf>3?frames[3]:0),
+                     (unsigned long long)(nf>4?frames[4]:0),
+                     (unsigned long long)(nf>5?frames[5]:0));
+#ifdef BOXEDWINE_DARWIN
+            if (yieldCount == 1 && cpu->thread && cpu->thread->process) {
+                // Dump the image list once (rip arg just picks an owner line).
+                bw64_dumpDyldImages(cpu->thread->process->id,
+                                    nf > 0 ? frames[0] : cpu->rip);
+            }
+#endif
         }
     }
 
@@ -4784,6 +4917,7 @@ void ksyscall64(CPU64* cpu) {
     if (ret == (U64)(S64)-K_CONTINUE || ret == (U64)(S64)-K_WAIT) {
         return;
     }
+    if (cpu->thread) cpu->thread->inSyscall64 = false;
     cpu->reg[X64_RAX].setU64(ret);
 }
 

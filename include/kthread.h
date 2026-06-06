@@ -132,6 +132,14 @@ public:
     // a fresh CPU64 here for each new thread. nullptr for 32-bit guests, where
     // the `cpu` member above is the working path.
     CPU64* cpu64 = nullptr;
+    // BW64_BLOCKDUMP bring-up diagnostic: the last 64-bit syscall this thread
+    // ENTERED and whether it has returned. A thread "blocked" in mach_msg /
+    // futex / sched_yield shows inSyscall64=true with lastSyscall64 = the
+    // blocking nr — lets the periodic dumper say exactly where each launchd
+    // thread is parked when the boot goes quiet.
+    U32 lastSyscall64 = 0xffffffff;
+    bool inSyscall64 = false;
+    U64 lastSyscallRip64 = 0;
 #endif
     KProcessPtr process;
     KMemory* const memory;

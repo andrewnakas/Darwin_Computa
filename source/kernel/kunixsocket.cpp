@@ -1019,7 +1019,7 @@ U32 KUnixSocketObject::dgramSend(KThread* thread, U32 destAddr, U32 destLen, std
 #ifdef BOXEDWINE_DARWIN
     // Bring-up symbolizer: catch the mldr->darlingserver set_dyld_info RPC and
     // stash its dyld_all_image_infos pointer so an abort can be symbolized.
-    if (getenv("BW64_ABRTBT") && !msg->data.empty()) {
+    if ((getenv("BW64_ABRTBT") || getenv("BW64_YIELDSPIN")) && !msg->data.empty()) {
         bw64_sniffDyldInfoRpc(thread->process->id, msg->data.data(), (U64)msg->data.size());
     }
 #endif
