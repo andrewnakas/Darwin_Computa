@@ -50,6 +50,14 @@ void createSysfs(const std::shared_ptr<FsNode> rootNode) {
 
     U32 cpuCount = Platform::getCpuCount();
     Fs::addVirtualFile(B("/sys/devices/system/cpu/present"), K__S_IREAD, k_mdev(0, 0), cpuNode, "0-"+BString::valueOf(cpuCount-1));
+    // glibc's sysconf(_SC_NPROCESSORS_CONF) (get_nprocs_conf) reads
+    // /sys/devices/system/cpu/possible FIRST; when it is absent it falls back to
+    // a path that, in our fake kernel, yielded 0. Darling's mldr commpage_setup
+    // writes *that* count into the macOS commpage _COMM_PAGE_PHYSICAL_CPUS, and
+    // libsystem_malloc's __malloc_initialize does `logical_ncpus / phys_ncpus`
+    // during nanozone init — a 0 there is a guest #DE (div-by-zero) that killed
+    // launchd. Expose `possible` (same range as `present`) so the count is >=1.
+    Fs::addVirtualFile(B("/sys/devices/system/cpu/possible"), K__S_IREAD, k_mdev(0, 0), cpuNode, "0-"+BString::valueOf(cpuCount-1));
     Fs::addVirtualFile(B("/sys/devices/system/cpu/online"), openSysCpuOnline, K__S_IREAD, k_mdev(0, 0), cpuNode);
     if (Platform::getCpuFreqMHz()) {
         for (U32 i = 0; i < cpuCount; i++) {

@@ -149,6 +149,7 @@
 #define X64_SYS_mlock             149
 #define X64_SYS_munlock           150
 #define X64_SYS_getrandom         318
+#define X64_SYS_getcpu            309
 #define X64_SYS_sched_yield       24
 #define X64_SYS_sched_setaffinity 203
 #define X64_SYS_sched_getaffinity 204
@@ -618,6 +619,24 @@ static U64 sys_mmap64(CPU64* cpu, U64 addr, U64 length, U64 prot, U64 flags, U64
         klog_fmt("MMAP [pid=%d] BIG anon enter addr=0x%llx len=0x%llx prot=0x%x",
                  (int)(cpu->thread ? cpu->thread->process->id : -1),
                  (unsigned long long)addr, (unsigned long long)length, (unsigned)prot);
+    }
+    // The macOS commpage lives at a FIXED guest address (x86_64
+    // _COMM_PAGE64_BASE_ADDRESS = 0x7fffffe00000). Darling's mldr maps it with a
+    // plain address hint (no MAP_FIXED), trusting the XNU kernel to reserve that
+    // exact page. Our hint logic relocates a hint whose range isn't free, so if
+    // anything already touched that page mldr's commpage ends up elsewhere while
+    // libsystem_malloc/libpthread/libdispatch read the hardcoded address (blank
+    // -> _phys_ncpus==0 -> div #DE in __malloc_initialize). Honor the commpage
+    // address verbatim (force-fixed) so the data mldr writes is where the guest
+    // reads it.
+    if (addr != 0 && (addr & ~0xFFFULL) == 0x7fffffe00000ULL) {
+        flags |= K_MAP_FIXED;
+        if (getenv("BW64_COMMPAGE")) {
+            klog_fmt("COMMPAGE: forcing MAP_FIXED for mmap addr=0x%llx len=0x%llx "
+                     "prot=0x%x pid=%d", (unsigned long long)addr,
+                     (unsigned long long)length, (unsigned)prot,
+                     (int)(cpu->thread ? cpu->thread->process->id : -1));
+        }
     }
     U64 ret;
     bool fixed = (flags & K_MAP_FIXED) != 0;
@@ -3846,6 +3865,16 @@ void ksyscall64(CPU64* cpu) {
             break;
         case X64_SYS_getrandom:
             ret = sys_getrandom64(cpu, a1, a2, a3);
+            break;
+        case X64_SYS_getcpu:
+            // getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache*).
+            // Darling's libsystem (via _os_cpu_number) calls this right after
+            // the commpage CPU-count read. We present a single CPU/NUMA node, so
+            // always report cpu 0 / node 0. The 3rd arg (tcache) is unused since
+            // Linux 2.6.24.
+            if (a1) cpu->memory->writed(a1, 0);
+            if (a2) cpu->memory->writed(a2, 0);
+            ret = 0;
             break;
         case X64_SYS_prlimit64:
             ret = sys_prlimit64_64(cpu, a1, a2, a3, a4);

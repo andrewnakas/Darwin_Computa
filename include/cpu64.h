@@ -15,6 +15,8 @@
 #include "reg64.h"
 #include "../source/emulation/cpu/common/fpu.h"
 #include <unordered_map>
+#include <array>
+#include <memory>
 
 class KThread;
 class KMemory64;
@@ -84,7 +86,32 @@ public:
         U64 mask = 0;
         bool installed = false;
     };
-    SigAction sigActions[65] = {};
+    // Signal *dispositions* are process-wide in Linux/glibc: all threads created
+    // with CLONE_SIGHAND (every pthread) share ONE handler table, so a
+    // sigaction() on any thread is visible to all siblings. We previously kept a
+    // per-CPU64 copy that diverged after clone — a SIGFPE handler installed by
+    // one thread was invisible to the thread that later took the #DE, so Darling's
+    // sigexc (fault-then-catch-in-handler) mechanism never found its handler.
+    // Now the table lives in a shared block: clone64 (CLONE_SIGHAND) shares the
+    // shared_ptr; forkProcess64 / execve give the child a fresh copy. `sigActions`
+    // is a convenience pointer into the shared block so existing
+    // `cpu->sigActions[sig]` call sites are unchanged.
+    typedef std::array<SigAction, 65> SigActionTable;
+    std::shared_ptr<SigActionTable> sharedSigActions = std::make_shared<SigActionTable>();
+    SigAction* sigActions = sharedSigActions->data();
+
+    // Point this CPU's disposition table at the same shared block as `from`
+    // (CLONE_SIGHAND siblings). Used by clone64 for new threads.
+    void shareSigActionsWith(const CPU64* from) {
+        sharedSigActions = from->sharedSigActions;
+        sigActions = sharedSigActions->data();
+    }
+    // Give this CPU its own private copy of `from`'s dispositions (fork / a fresh
+    // signal-handler namespace). Used by forkProcess64.
+    void copySigActionsFrom(const CPU64* from) {
+        sharedSigActions = std::make_shared<SigActionTable>(*from->sharedSigActions);
+        sigActions = sharedSigActions->data();
+    }
 
     // Signal blocking mask, round-tripped through rt_sigprocmask(2). Bit N
     // (1..64) corresponds to signal N+1. v1 stores only — no enforcement

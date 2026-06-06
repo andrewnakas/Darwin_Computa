@@ -77,12 +77,13 @@ void CPU64::cloneRegistersFrom(const CPU64* from) {
         xmm[i] = from->xmm[i];
     }
     fpu = from->fpu;
-    // Signal state is process-wide in glibc's model; copy the parent's so the
-    // new thread observes the same handler/mask registrations (delivery across
-    // threads is a later milestone).
-    for (int i = 0; i < 65; i++) {
-        sigActions[i] = from->sigActions[i];
-    }
+    // Signal *dispositions* (the handler table) are process-wide in glibc's
+    // model and must STAY shared across CLONE_SIGHAND siblings, not snapshot-
+    // copied here (a later sigaction on any thread must be seen by all). The
+    // caller picks the policy: clone64 calls shareSigActionsWith(parent),
+    // forkProcess64 calls copySigActionsFrom(parent). We deliberately do NOT
+    // touch sharedSigActions/sigActions here. The per-thread pieces (current
+    // mask, altstack) are copied as the thread's starting state.
     sigMask = from->sigMask;
     sigAltStack = from->sigAltStack;
 }
@@ -3631,6 +3632,73 @@ U32 CPU64::step() {
                 for (int i = 0; i < 8; i++) nHi |= ((U64)dst[i+8]) << (i*8);
                 xmm[m.regField].lo = nLo;
                 xmm[m.regField].hi = nHi;
+                U32 used = opOff + 3 + m.length + 1;
+                rip += used;
+                return used;
+            }
+            if (op2 == 0x3A && (op3 == 0x08 || op3 == 0x09 ||
+                                op3 == 0x0A || op3 == 0x0B)) {
+                // ROUNDPS(08)/ROUNDPD(09)/ROUNDSS(0A)/ROUNDSD(0B) — SSE4.1.
+                // imm8: bits[1:0] = rounding mode when bit2==0
+                //   0 = round to nearest (even), 1 = floor, 2 = ceil, 3 = trunc.
+                // bit2 (0x4) = use the current MXCSR rounding mode instead.
+                // ROUNDSS/SD round only the low element and preserve the rest of
+                // the destination; ROUNDPS/PD round all packed elements. Darling's
+                // libm / CoreFoundation early init emits ROUNDSD/SS (e.g. for
+                // rint()/nearbyint()), which is what we hit after malloc init.
+                bool isDouble = (op3 == 0x09 || op3 == 0x0B);
+                bool isScalar = (op3 == 0x0A || op3 == 0x0B);
+                ModRM m = decodeModRM(rip + opOff + 3, p, 1);
+                U64 sLo, sHi;
+                if (m.isReg) {
+                    sLo = xmm[m.rmIndex].lo; sHi = xmm[m.rmIndex].hi;
+                } else {
+                    sLo = memory->readq(m.effAddr);
+                    sHi = memory->readq(m.effAddr + 8);
+                }
+                U8 imm = fetchByte(rip + opOff + 3 + m.length);
+                // bit2 set => use MXCSR rounding mode. We don't model MXCSR
+                // rounding bits (default is round-to-nearest), so treat the
+                // MXCSR path as nearest-even (mode 0). Explicit imm modes 1..3
+                // are honored exactly.
+                U32 mode = (imm & 0x4) ? 0u : (U32)(imm & 0x3);
+                auto roundD = [mode](double v) -> double {
+                    switch (mode) {
+                        case 1: return std::floor(v);
+                        case 2: return std::ceil(v);
+                        case 3: return std::trunc(v);
+                        default: return std::nearbyint(v); // ties-to-even
+                    }
+                };
+                auto roundF = [&](float v) -> float { return (float)roundD((double)v); };
+                if (isDouble) {
+                    double d0; memcpy(&d0, &sLo, 8);
+                    U64 r0; double rd0 = roundD(d0); memcpy(&r0, &rd0, 8);
+                    xmm[m.regField].lo = r0;
+                    if (!isScalar) {
+                        double d1; memcpy(&d1, &sHi, 8);
+                        U64 r1; double rd1 = roundD(d1); memcpy(&r1, &rd1, 8);
+                        xmm[m.regField].hi = r1;
+                    } // ROUNDSD keeps dest hi
+                } else {
+                    float f[4];
+                    f[0] = *(float*)&sLo;
+                    { U32 t = (U32)(sLo >> 32); f[1] = *(float*)&t; }
+                    { U32 t = (U32)(sHi);       f[2] = *(float*)&t; }
+                    { U32 t = (U32)(sHi >> 32); f[3] = *(float*)&t; }
+                    int n = isScalar ? 1 : 4; // ROUNDSS only low element
+                    for (int i = 0; i < n; i++) f[i] = roundF(f[i]);
+                    if (isScalar) {
+                        // low 32 bits rounded, rest of dest preserved
+                        U32 r0 = *(U32*)&f[0];
+                        xmm[m.regField].lo = (xmm[m.regField].lo & 0xFFFFFFFF00000000ULL) | r0;
+                    } else {
+                        U32 r0 = *(U32*)&f[0], r1 = *(U32*)&f[1];
+                        U32 r2 = *(U32*)&f[2], r3 = *(U32*)&f[3];
+                        xmm[m.regField].lo = ((U64)r1 << 32) | r0;
+                        xmm[m.regField].hi = ((U64)r3 << 32) | r2;
+                    }
+                }
                 U32 used = opOff + 3 + m.length + 1;
                 rip += used;
                 return used;

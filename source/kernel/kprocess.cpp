@@ -908,7 +908,13 @@ U32 KProcess::execve(KThread* thread, BString path, std::vector<BString>& args, 
             this->cpu64->mmapNext = 0;
             this->cpu64->sigMask = 0;
             this->cpu64->futexWaiters.clear();
-            for (int i = 0; i < 65; i++) this->cpu64->sigActions[i] = CPU64::SigAction{};
+            // execve resets all signal dispositions to SIG_DFL and starts a
+            // single-threaded image. Give it a FRESH private disposition table
+            // (don't keep writing through a block that pre-exec siblings may
+            // still reference) so future pthreads share THIS image's handlers.
+            this->cpu64->sharedSigActions =
+                std::make_shared<CPU64::SigActionTable>();
+            this->cpu64->sigActions = this->cpu64->sharedSigActions->data();
         }
         // loadProgram64 keys "is this 64-bit?" off the ELF, not this flag, and
         // reuses the existing non-null cpu64/memory64. Hand it the post-prepend
@@ -1810,6 +1816,11 @@ U32 KProcess::clone64(KThread* thread, U64 flags, U64 child_stack, U64 ptid, U64
     CPU64* parentCpu = thread->cpu64 ? thread->cpu64 : this->cpu64;
     CPU64* childCpu = new CPU64(this->memory64);
     childCpu->cloneRegistersFrom(parentCpu);
+    // CLONE_SIGHAND: the new thread SHARES the process-wide signal-disposition
+    // table, so a sigaction() on any sibling is immediately visible here. This
+    // is what lets Darling's sigexc work: the thread that takes the #DE finds
+    // the SIGFPE handler another thread installed.
+    childCpu->shareSigActionsWith(parentCpu);
     childCpu->thread = newThread;
     newThread->cpu64 = childCpu;
 
@@ -1902,6 +1913,10 @@ U32 KProcess::forkProcess64(KThread* thread, U64 flags, U64 ctid, U64 ptid) {
     KThread* newThread = newProcess->createThread();
     CPU64* childCpu = new CPU64(newProcess->memory64);
     childCpu->cloneRegistersFrom(parentCpu);
+    // fork(2): the child gets its OWN copy of the parent's dispositions (a
+    // separate process — no CLONE_SIGHAND), so later sigaction()s don't bleed
+    // across the fork boundary.
+    childCpu->copySigActionsFrom(parentCpu);
     childCpu->thread = newThread;
     childCpu->memory = newProcess->memory64;
     childCpu->reg[X64_RAX].setU64(0);   // child sees fork() == 0
