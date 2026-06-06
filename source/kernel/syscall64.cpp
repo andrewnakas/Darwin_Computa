@@ -1677,7 +1677,37 @@ static U64 sys_readlink64(CPU64* cpu, U64 pathAddr, U64 buf, U64 sz) {
     // intermediate /proc/self (-> the numeric pid dir) and the terminal
     // .../exe (-> the executable's real path). Without /proc/self resolving,
     // realpath bails and wine derives a bogus "/proc"-based install dir.
-    if (std::strcmp(path, "/proc/self") == 0 || std::strcmp(path, "/proc/thread-self") == 0) {
+    // /proc/{self,thread-self,<pid>}/fd/<n> -> the real path of open fd <n>.
+    // darlingserver resolves the vchroot directory fd this way
+    // (setVchrootDirectory: readlink("/proc/self/fd/<n>")). Without this the
+    // vchroot path is empty, mldr expands every guest path against "" and
+    // launchd's `execv("/sbin/launchd")` opens the bare (nonexistent) path and
+    // dies. Accept self / thread-self / our own numeric pid as the proc dir.
+    const char* fdTail = nullptr;
+    if (std::strncmp(path, "/proc/self/fd/", 14) == 0) {
+        fdTail = path + 14;
+    } else if (std::strncmp(path, "/proc/thread-self/fd/", 21) == 0) {
+        fdTail = path + 21;
+    } else {
+        BString pidFdPrefix = B("/proc/") + BString::valueOf(proc->id) + B("/fd/");
+        if (std::strncmp(path, pidFdPrefix.c_str(), pidFdPrefix.length()) == 0) {
+            fdTail = path + pidFdPrefix.length();
+        }
+    }
+    if (fdTail && fdTail[0]) {
+        char* end = nullptr;
+        long n = std::strtol(fdTail, &end, 10);
+        if (end && *end == '\0' && n >= 0) {
+            KFileDescriptorPtr fd = proc->getFileDescriptor((FD)n);
+            if (fd && fd->kobject) {
+                resolved = fd->kobject->selfFd();
+            } else {
+                return (U64)-K_ENOENT;
+            }
+        } else {
+            return (U64)-22; // -EINVAL
+        }
+    } else if (std::strcmp(path, "/proc/self") == 0 || std::strcmp(path, "/proc/thread-self") == 0) {
         resolved = BString::valueOf(proc->id);                 // relative target, like Linux
     } else if (std::strcmp(path, "/proc/self/exe") == 0 ||
                std::strcmp(path, "/proc/thread-self/exe") == 0 ||
@@ -2842,6 +2872,7 @@ static const char* x64SyscallName(U64 nr) {
         case 291: return "epoll_create1";
         case 293: return "pipe2";
         case 302: return "prlimit64";
+        case 309: return "getcpu";
         case 318: return "getrandom";
         case 334: return "rseq";
         case 435: return "clone3";

@@ -5253,7 +5253,32 @@ void CPU64::run() {
     int ringPos = 0;
     bool wildFired = false;
 
+    // BW64_PCSAMPLE=N: every N instructions, log this thread's RIP + leading
+    // opcode bytes. A busy-spin (no syscalls) loops over a tiny set of PCs, so a
+    // few samples reveal the loop body and let it be mapped (otool) like the #DE.
+    // Cheap: one counter compare per step. Default N=2,000,000 if set but empty.
+    static const char* pcSampleEnv = std::getenv("BW64_PCSAMPLE");
+    const U64 pcSampleEvery = pcSampleEnv
+        ? (std::strtoull(pcSampleEnv, nullptr, 0) ? std::strtoull(pcSampleEnv, nullptr, 0) : 2000000ull)
+        : 0;
+    U64 pcSampleCtr = 0;
+
     while (!yield) {
+        if (pcSampleEvery && ++pcSampleCtr >= pcSampleEvery) {
+            pcSampleCtr = 0;
+            U64 r = rip;
+            klog_fmt("PCSAMPLE pid=%d tid=%d RIP=0x%llx %02x %02x %02x %02x %02x %02x %02x "
+                     "rax=%llx rbx=%llx rcx=%llx rdx=%llx rsi=%llx rdi=%llx rsp=%llx rbp=%llx",
+                     (int)(thread && thread->process ? thread->process->id : -1),
+                     (int)(thread ? thread->id : -1),
+                     (unsigned long long)r,
+                     fetchByte(r), fetchByte(r+1), fetchByte(r+2), fetchByte(r+3),
+                     fetchByte(r+4), fetchByte(r+5), fetchByte(r+6),
+                     (unsigned long long)reg[X64_RAX].u64, (unsigned long long)reg[X64_RBX].u64,
+                     (unsigned long long)reg[X64_RCX].u64, (unsigned long long)reg[X64_RDX].u64,
+                     (unsigned long long)reg[X64_RSI].u64, (unsigned long long)reg[X64_RDI].u64,
+                     (unsigned long long)reg[X64_RSP].u64, (unsigned long long)reg[X64_RBP].u64);
+        }
         if (tracing && instructionCount >= traceFrom && instructionCount <= traceTo) {
             U64 r = rip;
             klog_fmt("TRACE #%llu RIP=0x%llx %02x %02x %02x %02x  "
