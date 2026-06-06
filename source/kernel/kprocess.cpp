@@ -887,6 +887,14 @@ U32 KProcess::execve(KThread* thread, BString path, std::vector<BString>& args, 
     // re-seed RIP/RSP/fsbase. platformThread re-reads thread->cpu64 each loop
     // iteration, so it picks up the re-seeded state on the next run() entry.
     if (this->is64Bit) {
+        // Drop this thread's cached AF_UNIX msg-scratch mmap: it lived in the
+        // address space we're about to replace, so post-exec sendmsg/recvmsg must
+        // re-allocate it. (mldr re-execs itself in-place for vchroot->launchd; a
+        // stale scratch caused "failed to get ram" + a garbled darlingserver
+        // checkin.) Defined in syscall64.cpp.
+        extern void bw64_clearMsgScratchForThread(U32 threadId);
+        if (thread) bw64_clearMsgScratchForThread(thread->id);
+
         KMemory64* freshMem = new KMemory64(this);
         delete this->memory64;
         this->memory64 = freshMem;

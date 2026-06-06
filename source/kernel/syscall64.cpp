@@ -2412,6 +2412,16 @@ static U32 bounceSockaddrTo32(CPU64* cpu, U64 src64, U32 len, U32* outLenAddr) {
 // Per-THREAD (see bounceSockaddrTo32's note): a per-process msg scratch is
 // corrupted when sibling threads sendmsg/recvmsg concurrently.
 static std::unordered_map<U32, U32> g_msgScratchByThread;
+// execve replaces the process address space, so any cached msg-scratch mmap for
+// a thread of that process is now a dangling guest address. mldr re-execs ITSELF
+// in-place (same pid/tid) when it loads the next Darwin image (e.g. vchroot ->
+// launchd); without invalidation the post-exec sendmsg writes to the stale
+// scratch -> "performOnMemory failed to get ram" + a garbled checkin send
+// (BAD SEND LENGTH). KProcess::execve calls this to drop the stale entries.
+void bw64_clearMsgScratchForThread(U32 threadId) {
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(g_scratchMutex);
+    g_msgScratchByThread.erase(threadId);
+}
 static U32 msgScratch(KThread* thread) {
     if (!thread || !thread->memory || !thread->process) return 0;
     BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(g_scratchMutex);
