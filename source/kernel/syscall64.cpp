@@ -2547,22 +2547,40 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     m32->writed(base + MSG_SCRATCH_HDR + 12, total ? 1 : 0);       // msg_iovlen
     U32 ctl32 = 0, ctllen32 = 0;
     if (control && ctllen >= 16) {
-        // Translate SCM_RIGHTS: 64-bit cmsg {len(0),level(8),type(12),fds(16..)}.
-        // The object's recv side reads 16-byte cmsg records with the fd at +12,
-        // i.e. one fd per 16 bytes. Emit that compact form into the cmsg area.
-        U64 clen  = cpu->memory->readq(control + 0);
-        U32 level = cpu->memory->readd(control + 8);
-        U32 type  = cpu->memory->readd(control + 12);
-        if (level == K_SOL_SOCKET && type == K_SCM_RIGHTS) {
-            U32 nfds = (U32)((clen - 16) / 4);
-            U32 cm = base + MSG_SCRATCH_CMSG;
-            for (U32 i = 0; i < nfds; i++) {
-                U32 hostFd = cpu->memory->readd(control + 16 + 4 * i);
-                m32->writed(cm + 16 * i + 0, 16);            // cmsg_len
-                m32->writed(cm + 16 * i + 4, K_SOL_SOCKET);  // cmsg_level
-                m32->writed(cm + 16 * i + 8, K_SCM_RIGHTS);  // cmsg_type
-                m32->writed(cm + 16 * i + 12, hostFd);       // fd
+        // Walk EVERY 64-bit cmsg header, not just the first. darlingserver sends
+        // SCM_CREDENTIALS as the FIRST cmsg on every message and SCM_RIGHTS (when
+        // it passes an fd, e.g. the kqchan_mach_port_open reply) as a SECOND
+        // header; only inspecting cmsg[0] silently dropped every fd it ever sent.
+        // 64-bit cmsg layout: {len(u64@0), level(s32@8), type(s32@12), data@16},
+        // each header padded to CMSG_ALIGN (8-byte) of cmsg_len. Collect every
+        // SCM_RIGHTS fd into the object's compact 16-byte-per-fd recv form (one
+        // record per fd, fd at +12), skipping SCM_CREDENTIALS (we synthesize creds
+        // on the receive side).
+        U32 cm = base + MSG_SCRATCH_CMSG;
+        U32 nfds = 0;
+        const U32 maxFds = (MSG_SCRATCH_NAME - MSG_SCRATCH_CMSG) / 16; // scratch cap
+        U64 off = 0;
+        while (off + 16 <= ctllen) {
+            U64 clen  = cpu->memory->readq(control + off + 0);
+            U32 level = cpu->memory->readd(control + off + 8);
+            U32 type  = cpu->memory->readd(control + off + 12);
+            if (clen < 16 || off + clen > ctllen) break;
+            if (level == K_SOL_SOCKET && type == K_SCM_RIGHTS) {
+                U32 thisFds = (U32)((clen - 16) / 4);
+                for (U32 i = 0; i < thisFds && nfds < maxFds; i++, nfds++) {
+                    U32 hostFd = cpu->memory->readd(control + off + 16 + 4 * i);
+                    m32->writed(cm + 16 * nfds + 0, 16);            // cmsg_len
+                    m32->writed(cm + 16 * nfds + 4, K_SOL_SOCKET);  // cmsg_level
+                    m32->writed(cm + 16 * nfds + 8, K_SCM_RIGHTS);  // cmsg_type
+                    m32->writed(cm + 16 * nfds + 12, hostFd);       // fd
+                }
             }
+            // advance to the next header (cmsg_len rounded up to 8 bytes)
+            U64 step = (clen + 7) & ~(U64)7;
+            if (step == 0) break;
+            off += step;
+        }
+        if (nfds) {
             ctl32 = cm;
             ctllen32 = nfds * 16;
         }
@@ -2578,7 +2596,10 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // whether ksendmsg succeeded) is the missing half — recvmsg's 'M'/'F' only
     // capture the receive side. e0 = #fds sent, e1 = the first guest fd value.
     if (wsReadEnabled() && ctllen32) {
-        U32 firstFd = (control && ctllen >= 16) ? cpu->memory->readd(control + 16) : 0;
+        // First emitted SCM_RIGHTS fd (compact form: fd at +12 of the first
+        // 16-byte record). Read from the scratch we just built, not control+16 —
+        // the guest's first cmsg may be SCM_CREDENTIALS (darlingserver) not RIGHTS.
+        U32 firstFd = m32->readd(ctl32 + 12);
         crashRingRecordRead('S', (U32)thread->process->id, (U32)fd,
                             nullptr, 0, ctllen32 / 16, firstFd);
     }
