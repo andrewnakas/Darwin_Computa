@@ -32,6 +32,18 @@ class KSocketMsg {
 public:
     std::vector<KSocketMsgObject> objects;
     std::vector<U8> data;
+
+    // For AF_UNIX SOCK_DGRAM: the address the datagram was sent FROM, so a
+    // connectionless receiver can reply (recvmsg fills msg_name from this).
+    // hasSender distinguishes an unnamed/autobind-less sender (empty path) from
+    // "no address". For a stream socket these stay default and are unused.
+    bool hasSender = false;
+    BString senderPath;
+    // Sender credentials for SO_PASSCRED receivers (darlingserver enables it and
+    // identifies the checking-in process by the pid in SCM_CREDENTIALS).
+    U32 senderPid = 0;
+    U32 senderUid = 0;
+    U32 senderGid = 0;
 };
 
 #endif

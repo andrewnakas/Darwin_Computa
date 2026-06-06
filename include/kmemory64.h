@@ -150,6 +150,15 @@ public:
     bool isPageMapped(U64 pageNum) const;
     U32  getPageFlags(U64 pageNum) const;
 
+    // Render this address space as Linux /proc/<pid>/maps text: one line per
+    // maximal run of contiguous pages sharing the same r/w/x/shared permissions,
+    // formatted "<start>-<end> <perms> <offset> 00:00 0 [path]". darlingserver
+    // parses this (regex: start-end perms offset ...) to find the region holding
+    // an address + its protection (src/process.cpp memoryRegionInfo). Reserved-
+    // but-uncommitted pages (wine's huge PROT_NONE maps) are emitted too so the
+    // region boundaries match what the guest believes is mapped.
+    BString generateProcMaps() const;
+
     // Return the committed backing buffer for `pageNum`, or nullptr if the page
     // is absent/uncommitted. Used by the CPU64 instruction-fetch cache to grab a
     // stable per-page pointer once (under the lock) and then read bytes from it

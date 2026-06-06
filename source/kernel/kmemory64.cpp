@@ -19,6 +19,8 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <algorithm>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Process-shared file mappings (MAP_SHARED). A single host buffer per
@@ -192,6 +194,57 @@ U8* KMemory64::getCommittedPagePtr(U64 pageNum) {
 U32 KMemory64::getPageFlags(U64 pageNum) const {
     K64Page* p = getPage(pageNum);
     return p ? p->flags : 0;
+}
+
+BString KMemory64::generateProcMaps() const {
+    // Snapshot the mapped page numbers + their perm bits under the lock, then
+    // coalesce contiguous runs that share r/w/x/shared. We only consider pages
+    // flagged MAPPED (a present K64Page that's actually mapped, not a bare
+    // reservation slot) — that's what darlingserver needs to locate a live
+    // region for an address.
+    std::vector<std::pair<U64, U32>> mapped; // (pageNum, permBits)
+    {
+        BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(this->pagesMutex);
+        mapped.reserve(this->pages.size());
+        for (const auto& kv : this->pages) {
+            const K64Page* p = kv.second.get();
+            if (p && (p->flags & K64_PAGE_MAPPED)) {
+                mapped.emplace_back(kv.first, p->flags & (K64_PAGE_READ | K64_PAGE_WRITE | K64_PAGE_EXEC | K64_PAGE_SHARED));
+            }
+        }
+    }
+    std::sort(mapped.begin(), mapped.end());
+
+    BString result;
+    size_t i = 0;
+    while (i < mapped.size()) {
+        U64 startPage = mapped[i].first;
+        U32 perms = mapped[i].second;
+        U64 endPage = startPage;
+        size_t j = i + 1;
+        // Extend the run while pages are contiguous AND share permissions.
+        while (j < mapped.size() && mapped[j].first == endPage + 1 && mapped[j].second == perms) {
+            endPage = mapped[j].first;
+            j++;
+        }
+        U64 startAddr = startPage << K64_PAGE_SHIFT;
+        U64 endAddr = (endPage + 1) << K64_PAGE_SHIFT; // maps end is exclusive
+        char permStr[5];
+        permStr[0] = (perms & K64_PAGE_READ)  ? 'r' : '-';
+        permStr[1] = (perms & K64_PAGE_WRITE) ? 'w' : '-';
+        permStr[2] = (perms & K64_PAGE_EXEC)  ? 'x' : '-';
+        permStr[3] = (perms & K64_PAGE_SHARED) ? 's' : 'p';
+        permStr[4] = 0;
+        // "<start>-<end> <perms> <offset> <dev> <inode> <path>". We don't track
+        // file backing per region, so offset/dev/inode are zero and the path is
+        // blank — darlingserver only parses start/end/perms/offset.
+        BString line;
+        line.sprintf("%llx-%llx %s 00000000 00:00 0 \n",
+                     (unsigned long long)startAddr, (unsigned long long)endAddr, permStr);
+        result += line;
+        i = j;
+    }
+    return result;
 }
 
 // Process-wide mmap base — must match MMAP64_BASE in syscall64.cpp. Anonymous

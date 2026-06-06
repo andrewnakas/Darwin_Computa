@@ -4615,6 +4615,54 @@ U32 CPU64::step() {
                 // succeeds; no exception checks because we don't model
                 // FPU exception bits.
                 memory->writew(m.effAddr, (U16)fpu.CW());
+            } else if (op == 0xD9 && sub == 6) {
+                // D9 /6 = FNSTENV m14/m28 — store the x87 environment (control
+                // word, status word, tag word, and the FIP/FDP instruction/data
+                // pointers). glibc's feholdexcept (and darlingserver's FP/signal
+                // setup) save+mask the env around an operation. We model CW/SW/TW
+                // and zero the unmodeled pointer/opcode fields. Operand size: 14
+                // bytes (16-bit env) or 28 bytes (32-bit env, the default in long
+                // mode's compatibility forms); osz prefix selects 16-bit.
+                // Tag word: we don't track per-register tags here, so report all
+                // "empty" (0xFFFF), which is the safe default the env consumer
+                // re-derives from on FLDENV.
+                U16 cw = (U16)fpu.CW();
+                U16 sw = (U16)fpu.SW();
+                U16 tw = 0xFFFF;
+                if (p.osize16) {
+                    // 16-bit protected/real env: CW(2) SW(2) TW(2) IP(2) CS(2) DP(2) DS(2)
+                    memory->writew(m.effAddr + 0, cw);
+                    memory->writew(m.effAddr + 2, sw);
+                    memory->writew(m.effAddr + 4, tw);
+                    memory->writew(m.effAddr + 6, 0);
+                    memory->writew(m.effAddr + 8, 0);
+                    memory->writew(m.effAddr + 10, 0);
+                    memory->writew(m.effAddr + 12, 0);
+                } else {
+                    // 32-bit protected env: CW SW TW each in the low 16 bits of a
+                    // 32-bit field, then FIP, FCS+opcode, FDP, FDS (zeroed).
+                    memory->writed(m.effAddr + 0, cw);
+                    memory->writed(m.effAddr + 4, sw);
+                    memory->writed(m.effAddr + 8, tw);
+                    memory->writed(m.effAddr + 12, 0);
+                    memory->writed(m.effAddr + 16, 0);
+                    memory->writed(m.effAddr + 20, 0);
+                    memory->writed(m.effAddr + 24, 0);
+                }
+                // FNSTENV also masks all FPU exceptions in the control word as a
+                // side effect on real hardware; not modeled (no exception bits).
+            } else if (op == 0xD9 && sub == 4) {
+                // D9 /4 = FLDENV m14/m28 — load the x87 environment saved by
+                // FNSTENV. We apply the control word (rounding/precision) and the
+                // status word (which carries the TOP-of-stack pointer); the tag
+                // word and FIP/FDP pointers are not modeled.
+                if (p.osize16) {
+                    fpu.SetCW((U16)memory->readw(m.effAddr + 0));
+                    fpu.SetSW((U16)memory->readw(m.effAddr + 2));
+                } else {
+                    fpu.SetCW((U16)memory->readd(m.effAddr + 0));
+                    fpu.SetSW((U16)memory->readd(m.effAddr + 4));
+                }
             } else if (op == 0xDD && sub == 7) {
                 // DD /7 = FNSTSW m16 — store status word to memory.
                 memory->writew(m.effAddr, (U16)fpu.SW());

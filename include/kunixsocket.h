@@ -70,10 +70,26 @@ public:
     U32 setsockopt(KThread* thread, const KFileDescriptorPtr& fd, U32 level, U32 name, U32 value, U32 len) override;
     U32 shutdown(KThread* thread, const KFileDescriptorPtr& fd, U32 how) override;
 
-    std::shared_ptr<FsNode> node;    
+    std::shared_ptr<FsNode> node;
     std::weak_ptr<KUnixSocketObject> connection;
 
     static U32 unixsocket_write_native_nowait(const std::shared_ptr<KObject>& obj, U8* value, int len);
+
+    // --- AF_UNIX SOCK_DGRAM (connectionless) support ---------------------------
+    // Datagram unix sockets aren't connected: a sender names the destination per
+    // message (sendto/sendmsg msg_name) and the receiver pulls from its own msgs
+    // queue, learning the sender's address from the dequeued KSocketMsg. Pathname
+    // dgram sockets ALSO register a VFS node (like stream); autobind dgram sockets
+    // (bind with len==sizeof(family)) get a generated abstract name and ONLY live
+    // in this registry. Needed for darlingserver: mldr autobinds its rpc socket so
+    // the server can reply, and the server binds a pathname socket at the prefix.
+    BString boundPath;              // this dgram socket's own bound address (registry key)
+    bool soPassCred = false;        // SO_PASSCRED: synthesize SCM_CREDENTIALS on recv
+    static std::shared_ptr<KUnixSocketObject> findBoundDgram(const BString& path);
+    static void registerBoundDgram(const BString& path, const std::shared_ptr<KUnixSocketObject>& sock);
+    static void unregisterBoundDgram(const BString& path);
+    U32 dgramSend(KThread* thread, U32 destAddr, U32 destLen, std::shared_ptr<KSocketMsg> msg, bool nameFromHdr);
+    U32 ensureAutobind();           // assign an abstract autobind name if not yet bound
 
     void signalReadReady();
 

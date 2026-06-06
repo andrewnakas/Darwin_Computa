@@ -218,7 +218,40 @@ U32 Platform::allocateNativeMemory(U64 address) {
 }
 
 BString Platform::procStat() {
-    return BReadFile(B("/proc/stat")).readAll();
+    BReadFile hostFile(B("/proc/stat"));
+    if (hostFile.isOpen()) {
+        BString host = hostFile.readAll();
+        if (host.length()) {
+            return host;
+        }
+    }
+    // The host has no /proc/stat (macOS/darwin): fopen failed, so isOpen() is
+    // false. (Calling readAll() on a closed BReadFile does fread() on a NULL
+    // FILE* — undefined behavior that HUNG the darling boot here, spinning at
+    // 100% inside this function and never returning to the guest.)
+    // Darling's commpage/CPU-topology init in the guest counts the per-cpu
+    // "cpuN" lines here to learn how many cores are online; an EMPTY /proc/stat
+    // parses as zero online CPUs and the guest then SPINS forever (busy-loop at
+    // ~100% with no further syscalls — this was the darling boot hang right
+    // after /sys/devices/system/cpu/possible 404s). Synthesize a minimal but
+    // well-formed /proc/stat consistent with getCpuCount() so the guest sees a
+    // sane core count. Counters are zeroed (we don't model host CPU time); the
+    // line shape (1 aggregate "cpu" + N "cpuN") is what the parser keys on.
+    U32 count = Platform::getCpuCount();
+    if (count < 1) {
+        count = 1;
+    }
+    BString result = B("cpu  0 0 0 0 0 0 0 0 0 0\n");
+    for (U32 i = 0; i < count; i++) {
+        result += B("cpu") + BString::valueOf(i) + B(" 0 0 0 0 0 0 0 0 0 0\n");
+    }
+    result += B("intr 0\n");
+    result += B("ctxt 0\n");
+    result += B("btime 0\n");
+    result += B("processes 0\n");
+    result += B("procs_running 1\n");
+    result += B("procs_blocked 0\n");
+    return result;
 }
 
 U8* Platform::reserveNativeMemory64k(U32 count) {

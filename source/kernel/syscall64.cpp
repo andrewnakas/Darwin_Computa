@@ -16,6 +16,7 @@
 #include "kmemory64.h"
 #include "ksocket.h"
 #include "kevent.h"  // syscall_eventfd2 (shared with the 32-bit path)
+#include "kpidfd.h"  // syscall_pidfd_open (darlingserver process monitor)
 #include "ktimer.h"  // KTimer for 64-bit timerfd
 #include <thread>   // std::this_thread::yield() for sched_yield
 #include <mutex>    // std::recursive_mutex for BW64_SERIAL_TEARDOWN
@@ -173,6 +174,9 @@
 #define X64_SYS_timerfd_gettime   287
 #define X64_SYS_epoll_create1     291
 #define X64_SYS_epoll_create      213
+#define X64_SYS_pidfd_open        434
+#define X64_SYS_process_vm_readv  310
+#define X64_SYS_process_vm_writev 311
 #define X64_SYS_epoll_ctl         233
 #define X64_SYS_epoll_wait        232
 #define X64_SYS_pwrite64          18
@@ -2354,6 +2358,7 @@ static U32 bounceSockaddrTo32(CPU64* cpu, U64 src64, U32 len, U32* outLenAddr) {
 #define MSG_SCRATCH_HDR     0
 #define MSG_SCRATCH_IOV     32
 #define MSG_SCRATCH_CMSG    64
+#define MSG_SCRATCH_NAME    384   // sockaddr (msg_name) scratch; <=128 bytes, before DATA
 #define MSG_SCRATCH_DATA    512
 // Per-THREAD (see bounceSockaddrTo32's note): a per-process msg scratch is
 // corrupted when sibling threads sendmsg/recvmsg concurrently.
@@ -2390,10 +2395,26 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     if (!base) return (U64)-K_EFAULT;
     KMemory* m32 = thread->memory;
 
+    U64 name    = cpu->memory->readq(msg64 + 0);
+    U32 namelen = cpu->memory->readd(msg64 + 8);
     U64 iov     = cpu->memory->readq(msg64 + 16);
     U64 iovlen  = cpu->memory->readq(msg64 + 24);
     U64 control = cpu->memory->readq(msg64 + 32);
     U64 ctllen  = cpu->memory->readq(msg64 + 40);
+
+    // Destination address (msg_name) — required for SOCK_DGRAM sendto-style sends
+    // (e.g. darlingserver's mldr rpc checkin). Copy the sockaddr into scratch and
+    // point the 32-bit msghdr at it; the layout is identical between 32/64-bit
+    // (sa_family_t + path), so a byte copy is correct.
+    U32 name32 = 0, namelen32 = 0;
+    if (name && namelen) {
+        if (namelen > 128) namelen = 128;
+        std::vector<U8> nameTmp((size_t)namelen);
+        cpu->memory->memcpyFromGuest(nameTmp.data(), name, namelen);
+        m32->memcpy(base + MSG_SCRATCH_NAME, nameTmp.data(), namelen);
+        name32 = base + MSG_SCRATCH_NAME;
+        namelen32 = namelen;
+    }
 
     // Gather all iov segments into the scratch data buffer.
     U32 dataAddr = base + MSG_SCRATCH_DATA;
@@ -2414,8 +2435,8 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // Build the 32-bit msghdr: a single iovec covering the gathered blob.
     m32->writed(base + MSG_SCRATCH_IOV + 0, dataAddr);
     m32->writed(base + MSG_SCRATCH_IOV + 4, total);
-    m32->writed(base + MSG_SCRATCH_HDR + 0, 0);                    // msg_name
-    m32->writed(base + MSG_SCRATCH_HDR + 4, 0);                    // msg_namelen
+    m32->writed(base + MSG_SCRATCH_HDR + 0, name32);              // msg_name
+    m32->writed(base + MSG_SCRATCH_HDR + 4, namelen32);           // msg_namelen
     m32->writed(base + MSG_SCRATCH_HDR + 8, base + MSG_SCRATCH_IOV); // msg_iov
     m32->writed(base + MSG_SCRATCH_HDR + 12, total ? 1 : 0);       // msg_iovlen
     U32 ctl32 = 0, ctllen32 = 0;
@@ -2495,6 +2516,20 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     if (!base) return (U64)-K_EFAULT;
     KMemory* m32 = thread->memory;
 
+    // Is this an AF_UNIX SOCK_DGRAM socket? Its recv side returns the sender
+    // address (msg_name) and a 12-byte-header cmsg stream (SCM_CREDENTIALS /
+    // SCM_RIGHTS), which we translate differently from the connected-stream path.
+    bool isDgram = false;
+    {
+        KFileDescriptorPtr fdesc = thread->process->getFileDescriptor((FD)(S32)fd);
+        if (fdesc && fdesc->kobject && fdesc->kobject->type == KTYPE_UNIX_SOCKET) {
+            std::shared_ptr<KSocketObject> so = std::dynamic_pointer_cast<KSocketObject>(fdesc->kobject);
+            if (so && so->type == K_SOCK_DGRAM) isDgram = true;
+        }
+    }
+
+    U64 name    = cpu->memory->readq(msg64 + 0);
+    U32 namelen = cpu->memory->readd(msg64 + 8);
     U64 iov     = cpu->memory->readq(msg64 + 16);
     U64 iovlen  = cpu->memory->readq(msg64 + 24);
     U64 control = cpu->memory->readq(msg64 + 32);
@@ -2510,12 +2545,21 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     }
     if (want > dataCap) want = dataCap;
 
+    // If the guest wants the source address (msg_name != NULL, e.g. a SOCK_DGRAM
+    // receiver like darlingserver that must reply to the sender), give the object
+    // a scratch sockaddr buffer to fill; we copy it back to the 64-bit guest after.
+    U32 name32 = 0, namecap32 = 0;
+    if (name && namelen) {
+        name32 = base + MSG_SCRATCH_NAME;
+        namecap32 = (namelen > 128) ? 128 : namelen;
+    }
+
     U32 cmArea = base + MSG_SCRATCH_CMSG;
-    U32 cmCap = MSG_SCRATCH_DATA - MSG_SCRATCH_CMSG; // room for cmsg records
+    U32 cmCap = MSG_SCRATCH_NAME - MSG_SCRATCH_CMSG; // room for cmsg records
     m32->writed(base + MSG_SCRATCH_IOV + 0, dataAddr);
     m32->writed(base + MSG_SCRATCH_IOV + 4, want);
-    m32->writed(base + MSG_SCRATCH_HDR + 0, 0);
-    m32->writed(base + MSG_SCRATCH_HDR + 4, 0);
+    m32->writed(base + MSG_SCRATCH_HDR + 0, name32);
+    m32->writed(base + MSG_SCRATCH_HDR + 4, namecap32);
     m32->writed(base + MSG_SCRATCH_HDR + 8, base + MSG_SCRATCH_IOV);
     m32->writed(base + MSG_SCRATCH_HDR + 12, 1);
     m32->writed(base + MSG_SCRATCH_HDR + 16, (control && ctllen) ? cmArea : 0);
@@ -2554,6 +2598,54 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
             off += chunk;
             remaining -= chunk;
         }
+    }
+
+    // SOCK_DGRAM: copy the sender address back to the guest's msg_name, and
+    // translate the object's 12-byte-header cmsg stream (creds + rights) into the
+    // 64-bit guest cmsg. Done here (not in the shared block below) because the
+    // dgram cmsg layout differs from the connected-stream 16-byte-record form.
+    if (isDgram) {
+        // msg_name: copy the sockaddr the object wrote into scratch back out, and
+        // report the actual namelen the object set in the scratch msghdr.
+        if (name && namelen) {
+            U32 actualNameLen = m32->readd(base + MSG_SCRATCH_HDR + 4);
+            U32 copy = actualNameLen;
+            if (copy > namelen) copy = namelen;
+            for (U32 i = 0; i < copy; i++) {
+                cpu->memory->writeb(name + i, m32->readb(base + MSG_SCRATCH_NAME + i));
+            }
+            cpu->memory->writed(msg64 + 8, actualNameLen); // msg_namelen
+        } else {
+            cpu->memory->writed(msg64 + 8, 0);
+        }
+        // Walk the object's cmsg stream: each record is {len(4), level(4), type(4),
+        // data...} 8-byte aligned. Re-emit as 64-bit cmsg {len(8), level(4),
+        // type(4), data...} 8-byte aligned into the guest control buffer.
+        U32 ctllen32 = m32->readd(base + MSG_SCRATCH_HDR + 20);
+        U64 outPos = control;
+        U64 outEnd = control + ctllen;
+        U32 inPos = cmArea;
+        U32 inEnd = cmArea + ctllen32;
+        while (control && inPos + 12 <= inEnd) {
+            U32 clen   = m32->readd(inPos + 0);
+            U32 level  = m32->readd(inPos + 4);
+            U32 type   = m32->readd(inPos + 8);
+            if (clen < 12) break;
+            U32 dataLen = clen - 12;
+            U64 outRecord = 16 + (U64)dataLen;
+            if (outPos + outRecord > outEnd) break; // never overflow guest buffer
+            cpu->memory->writeq(outPos + 0, 16 + (U64)dataLen); // 64-bit cmsg_len
+            cpu->memory->writed(outPos + 8, level);
+            cpu->memory->writed(outPos + 12, type);
+            for (U32 i = 0; i < dataLen; i++) {
+                cpu->memory->writeb(outPos + 16 + i, m32->readb(inPos + 12 + i));
+            }
+            outPos += (outRecord + 7) & ~7ull;
+            U32 adv = (clen + 7) & ~7u;
+            inPos += adv;
+        }
+        cpu->memory->writeq(msg64 + 40, outPos - control); // msg_controllen
+        return (U64)(S64)(S32)rc;
     }
 
     // Translate any received SCM_RIGHTS fds (32-bit object wrote 16-byte cmsg
@@ -2722,6 +2814,9 @@ static const char* x64SyscallName(U64 nr) {
         case 273: return "set_robust_list";
         case 290: return "eventfd2";
         case 284: return "eventfd";
+        case 434: return "pidfd_open";
+        case 310: return "process_vm_readv";
+        case 311: return "process_vm_writev";
         case 283: return "timerfd_create";
         case 286: return "timerfd_settime";
         case 287: return "timerfd_gettime";
@@ -3654,6 +3749,58 @@ void ksyscall64(CPU64* cpu) {
             ret = done ? (U64)done : (U64)lastErr;
             break;
         }
+        case X64_SYS_process_vm_readv:
+        case X64_SYS_process_vm_writev: {
+            // process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
+            // and the writev counterpart: copy directly between THIS process's
+            // address space (local_iov) and the target pid's (remote_iov), no
+            // ptrace stop needed. darlingserver uses readv to fetch a checking-in
+            // process's strings/structs (e.g. the executable path in
+            // set_executable_path) — without it the checkin RPC fails and mldr
+            // aborts ("Failed to tell darlingserver about our executable path").
+            // Each struct iovec is { void* iov_base (8), size_t iov_len (8) }.
+            if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+            bool isRead = (nr == X64_SYS_process_vm_readv);
+            U32 targetPid = (U32)a1;
+            U64 localIov = a2; U64 liovcnt = a3;
+            U64 remoteIov = a4; U64 riovcnt = a5;
+            KProcessPtr target = KSystem::getProcess(targetPid);
+            if (!target) { ret = (U64)-K_ESRCH; break; }
+            KMemory64* localMem  = cpu->memory;          // this process's 64-bit mem
+            KMemory64* remoteMem = target->memory64;     // target's 64-bit mem
+            if (!remoteMem) { ret = (U64)-K_EFAULT; break; }
+            // Walk both iovec lists in lockstep, transferring min(local_remaining,
+            // remote_remaining) bytes at a time via a host bounce buffer. Returns
+            // the total bytes transferred (Linux semantics).
+            U64 total = 0;
+            U64 li = 0, ri = 0;          // current local/remote iovec index
+            U64 lOff = 0, rOff = 0;      // byte offset within the current iovec
+            while (li < liovcnt && ri < riovcnt) {
+                U64 lBase = cpu->memory->readq(localIov + li * 16);
+                U64 lLen  = cpu->memory->readq(localIov + li * 16 + 8);
+                U64 rBase = cpu->memory->readq(remoteIov + ri * 16);
+                U64 rLen  = cpu->memory->readq(remoteIov + ri * 16 + 8);
+                U64 lRem = (lOff < lLen) ? (lLen - lOff) : 0;
+                U64 rRem = (rOff < rLen) ? (rLen - rOff) : 0;
+                if (lRem == 0) { li++; lOff = 0; continue; }
+                if (rRem == 0) { ri++; rOff = 0; continue; }
+                U64 chunk = (lRem < rRem) ? lRem : rRem;
+                if (chunk > 65536) chunk = 65536; // bounce in bounded steps
+                std::vector<U8> buf((size_t)chunk);
+                if (isRead) {
+                    // read from remote -> write to local
+                    remoteMem->memcpyFromGuest(buf.data(), rBase + rOff, chunk);
+                    localMem->memcpyToGuest(lBase + lOff, buf.data(), chunk);
+                } else {
+                    // read from local -> write to remote
+                    localMem->memcpyFromGuest(buf.data(), lBase + lOff, chunk);
+                    remoteMem->memcpyToGuest(rBase + rOff, buf.data(), chunk);
+                }
+                lOff += chunk; rOff += chunk; total += chunk;
+            }
+            ret = (U64)total;
+            break;
+        }
         case X64_SYS_setsid:
             // setsid() — new session; we don't model sessions, return the pid
             // (matches the 32-bit stub). wineserver daemonizes with this.
@@ -4103,6 +4250,16 @@ void ksyscall64(CPU64* cpu) {
             // for timed epoll wakeups ("Failed to create timer descriptor").
             if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
             ret = (U64)(S64)(S32)cpu->thread->process->timerfd_create((U32)a1, (U32)a2);
+            break;
+        case X64_SYS_pidfd_open:
+            // pidfd_open(pid, flags) — an epoll-able fd that becomes readable when
+            // the target process dies. darlingserver opens one per tracked macOS
+            // process (src/process.cpp:39, when no lifetime pipe) and monitors it
+            // for death; it throws "Failed to open pidfd for process" on failure,
+            // which stalled the mldr checkin (the server couldn't finish handling
+            // the checkin without a process monitor, so it never replied).
+            if (!cpu->thread || !cpu->thread->process) { ret = (U64)-K_ENOSYS; break; }
+            ret = (U64)(S64)(S32)syscall_pidfd_open(cpu->thread, (U32)a1, (U32)a2);
             break;
         case X64_SYS_timerfd_settime: {
             // timerfd_settime(fd, flags, new*, old*). The struct is a 64-bit

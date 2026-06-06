@@ -250,8 +250,61 @@ FsOpenNode* openCommandLine(const std::shared_ptr<FsNode>& node, U32 flags, U32 
     return new BufferAccess(node, flags, KThread::currentThread()->process->commandLine);
 }
 
+// /proc/<pid>/maps — `data` carries the TARGET pid (not the caller's). Generated
+// from the target's 64-bit address space. darlingserver reads another process's
+// maps to locate the region holding an address + its protection.
+FsOpenNode* openProcPidMaps(const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+    BString content;
+    KProcessPtr target = KSystem::getProcess(data);
+    if (target && target->memory64) {
+        content = target->memory64->generateProcMaps();
+    }
+    return new BufferAccess(node, flags, content);
+}
+
+// /proc/<pid>/status — darlingserver only parses the `PPid:` line (tab-separated)
+// to find the parent process, plus we emit the common header fields for any other
+// reader. `data` carries the target pid.
+FsOpenNode* openProcPidStatus(const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+    BString content;
+    KProcessPtr target = KSystem::getProcess(data);
+    if (target) {
+        BString s;
+        s.sprintf("Name:\t%s\nState:\tR (running)\nTgid:\t%u\nPid:\t%u\nPPid:\t%u\nUid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nThreads:\t1\n",
+                  target->name.c_str(),
+                  (unsigned)target->id, (unsigned)target->id, (unsigned)target->parentId,
+                  (unsigned)target->userId, (unsigned)target->userId, (unsigned)target->userId, (unsigned)target->userId,
+                  (unsigned)target->groupId, (unsigned)target->groupId, (unsigned)target->groupId, (unsigned)target->groupId);
+        content = s;
+    }
+    return new BufferAccess(node, flags, content);
+}
+
+// /proc/<pid>/statm — resident/total page counts. darlingserver reads it for
+// memory accounting; the first field (total program size in pages) is what
+// matters. `data` carries the target pid.
+FsOpenNode* openProcPidStatm(const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+    BString content;
+    KProcessPtr target = KSystem::getProcess(data);
+    if (target && target->memory64) {
+        U64 pages = target->memory64->mappedPageCount();
+        BString s;
+        // size resident shared text lib data dt — we report size==resident==pages,
+        // the rest 0. (Linux statm fields are in pages.)
+        s.sprintf("%llu %llu 0 0 0 0 0\n", (unsigned long long)pages, (unsigned long long)pages);
+        content = s;
+    }
+    return new BufferAccess(node, flags, content);
+}
+
 void KProcess::setupCommandlineNode() {
     Fs::addVirtualFile(this->processNode->path +"/cmdline", openCommandLine, K__S_IREAD, 0, this->processNode);
+    // Per-process introspection files darlingserver reads about a tracked process.
+    // Pass the pid through `data` so the generator targets THIS process, not the
+    // caller (darlingserver reads pid 26's files from pid 10).
+    Fs::addVirtualFile(this->processNode->path + "/maps",   openProcPidMaps,   K__S_IREAD, 0, this->processNode, this->id);
+    Fs::addVirtualFile(this->processNode->path + "/status", openProcPidStatus, K__S_IREAD, 0, this->processNode, this->id);
+    Fs::addVirtualFile(this->processNode->path + "/statm",  openProcPidStatm,  K__S_IREAD, 0, this->processNode, this->id);
 }
 
 BString KProcess::getAbsoluteExePath() { 
@@ -782,7 +835,18 @@ U32 KProcess::execve(KThread* thread, BString path, std::vector<BString>& args, 
         args.insert(args.begin(), interpreterArgs.begin(), interpreterArgs.end());
         args.insert(args.begin(), interpreter);
         this->exe = interpreter;
-    } else {        
+    } else if (KSystem::darwinMode && !args.empty() && args[0].length()) {
+        // Darwin/Darling: the Linux kernel hands argv[0] to the new program
+        // verbatim, and Darling depends on that. darlingserver execs mldr with
+        // argv[0] = "mldr!<bootpath>" (its self-relaunch convention — mldr
+        // parses the path after '!' to find the Mach-O to load, e.g. vchroot).
+        // The Wine-era rewrite below clobbers argv[0] with the full mldr path,
+        // stripping the '!', so mldr falls back to argv[1] ("vchroot", a bare
+        // relative name) and dies with "Cannot open vchroot". Preserve the
+        // caller's argv[0]; only fix up exe (used for /proc/self/exe etc.).
+        this->exe = (path != "/proc/self/exe" && path != "/proc/" + BString::valueOf(id) + "/exe")
+                    ? path : this->exe;
+    } else {
         if (path != "/proc/self/exe" && path != "/proc/" + BString::valueOf(id) + "/exe") {
             // :TODO: why does this need to be changed, seems like a bug
             args[0] = BString(Fs::getFullPath(currentDirectory, path)); // if path is a link, we should use the link not the actual path

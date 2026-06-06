@@ -151,6 +151,23 @@ KThread::KThread(U32 id, const KProcessPtr& process) :
         this->commNode = Fs::addVirtualFile(threadNode->path + B("/comm"), [this](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
             return new BufferAccess(node, flags, &this->name);
             }, K__S_IREAD | K__S_IWRITE, k_mdev(0, 0), threadNode);
+        // /proc/<pid>/task/<tid>/status — darlingserver enumerates the task dir and
+        // parses each thread's `NSpid:` (tab-separated) to map our tid to its
+        // namespace tid (src/thread.cpp). We run a single namespace so NSpid==tid.
+        U32 tid = this->id;
+        Fs::addVirtualFile(threadNode->path + B("/status"), [tid](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+            BString s;
+            s.sprintf("Name:\tthread\nState:\tR (running)\nTgid:\t%u\nPid:\t%u\nNSpid:\t%u\nThreads:\t1\n",
+                      (unsigned)tid, (unsigned)tid, (unsigned)tid);
+            return new BufferAccess(node, flags, s);
+            }, K__S_IREAD, k_mdev(0, 0), threadNode);
+        // /proc/<pid>/task/<tid>/stat — darlingserver's getRunState parses the
+        // single state char after the "(comm)" field. Format: "pid (comm) state ...".
+        Fs::addVirtualFile(threadNode->path + B("/stat"), [tid](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+            BString s;
+            s.sprintf("%u (thread) R 0 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0\n", (unsigned)tid);
+            return new BufferAccess(node, flags, s);
+            }, K__S_IREAD, k_mdev(0, 0), threadNode);
     }
     //BString tmp = BString::valueOf(id);
     //tmp += ".txt";

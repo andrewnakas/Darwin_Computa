@@ -35,6 +35,7 @@
 
 #define K_MSG_OOB 1
 #define	K_MSG_PEEK     0x2
+#define K_MSG_TRUNC    0x20
 #define K_MSG_NOSIGNAL 0x4000
 
 #define K_SHUT_RD      0
@@ -77,6 +78,7 @@
 #define K_IPPROTO_TCP 6
 
 #define K_SCM_RIGHTS  1
+#define K_SCM_CREDENTIALS 2
 
 #define K_IP_TOS      1
 #define K_IP_TTL      2

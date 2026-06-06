@@ -22,6 +22,9 @@
 #include "ksocket.h"
 #include "kstat.h"
 #include "ksignal.h"
+
+#include <string>
+#include <unordered_map>
 #include "../x11wire/xwireserver.h"
 #include "../x11wire/xwireconnection.h"
 
@@ -31,6 +34,9 @@ KUnixSocketObject::KUnixSocketObject(U32 domain, U32 type, U32 protocol) : KSock
 }
 
 KUnixSocketObject::~KUnixSocketObject() {
+    if (this->boundPath.length()) {
+        KUnixSocketObject::unregisterBoundDgram(this->boundPath);
+    }
     if (this->node) {
         std::shared_ptr<FsNode> parent = this->node->getParent().lock();
         if (parent) {
@@ -103,6 +109,56 @@ KUnixSocketObject::~KUnixSocketObject() {
     }
 }
 
+// --- AF_UNIX SOCK_DGRAM bound-socket registry --------------------------------
+// Connectionless dgram delivery needs to resolve a destination address to its
+// receiving socket object. Pathname dgram sockets also create a VFS node (so they
+// could be found that way) but autobind sockets do not, so a single flat registry
+// keyed by the bound address string covers both uniformly. Guarded by its own
+// mutex; the stored weak_ptrs self-clean on socket destruction (the dtor calls
+// unregisterBoundDgram).
+static std::mutex g_dgramRegistryMutex;
+static std::unordered_map<std::string, std::weak_ptr<KUnixSocketObject>> g_dgramRegistry;
+
+std::shared_ptr<KUnixSocketObject> KUnixSocketObject::findBoundDgram(const BString& path) {
+    std::lock_guard<std::mutex> lock(g_dgramRegistryMutex);
+    auto it = g_dgramRegistry.find(std::string(path.c_str()));
+    if (it == g_dgramRegistry.end()) {
+        return nullptr;
+    }
+    std::shared_ptr<KUnixSocketObject> s = it->second.lock();
+    if (!s) {
+        g_dgramRegistry.erase(it);
+    }
+    return s;
+}
+
+void KUnixSocketObject::registerBoundDgram(const BString& path, const std::shared_ptr<KUnixSocketObject>& sock) {
+    std::lock_guard<std::mutex> lock(g_dgramRegistryMutex);
+    g_dgramRegistry[std::string(path.c_str())] = sock;
+}
+
+void KUnixSocketObject::unregisterBoundDgram(const BString& path) {
+    std::lock_guard<std::mutex> lock(g_dgramRegistryMutex);
+    g_dgramRegistry.erase(std::string(path.c_str()));
+}
+
+// Give an unbound dgram socket an abstract autobind name so the peer it sends to
+// can reply (Linux assigns "\0<5 hex digits>" on autobind / on first send from an
+// unbound socket). We model the leading NUL as a literal "@" prefix in our string
+// keys (abstract namespace), which never collides with a real pathname.
+U32 KUnixSocketObject::ensureAutobind() {
+    if (this->boundPath.length()) {
+        return 0;
+    }
+    static std::atomic<U32> counter{1};
+    U32 n = counter.fetch_add(1);
+    BString name;
+    name.sprintf("@dgram-autobind-%05x", (unsigned)(n & 0xfffff));
+    this->boundPath = name;
+    KUnixSocketObject::registerBoundDgram(this->boundPath, std::dynamic_pointer_cast<KUnixSocketObject>(shared_from_this()));
+    return 0;
+}
+
 void KUnixSocketObject::setBlocking(bool blocking) {
     BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
     this->blocking = blocking;
@@ -144,6 +200,15 @@ bool KUnixSocketObject::isReadReady() {
 }
 
 bool KUnixSocketObject::isWriteReady() {
+    // A connectionless datagram socket is always ready to send (each sendmsg is
+    // routed to the destination's queue, there is no peer flow-control). Reporting
+    // it as NOT writable made darlingserver's outbox spin: it epoll-waits for the
+    // listener socket to become writable to flush replies, and with no connection
+    // (dgram) connection.expired() was always true -> never writable -> a busy
+    // eventfd re-arm loop that starved the rest of the boot.
+    if (this->type == K_SOCK_DGRAM) {
+        return true;
+    }
     return !connection.expired();
 }
 
@@ -525,12 +590,18 @@ U32 KUnixSocketObject::bind(KThread* thread, const KFileDescriptorPtr& fd, U32 a
         BString name = socketAddressName(memory, address, len);
 
         if (name.length() == 0) {
+            // No path in the address. For a DGRAM socket this is AUTOBIND
+            // (bind(fd, &family, sizeof(family))): Linux assigns an abstract name
+            // so peers can reply. darlingserver's mldr rpc socket relies on this.
+            if (this->type == K_SOCK_DGRAM) {
+                return this->ensureAutobind();
+            }
             return 0; // :TODO: why does XOrg need this
         }
         std::shared_ptr<FsNode> node = Fs::getNodeFromLocalPath(thread->process->currentDirectory, name, true);
         if (node) {
             return -K_EADDRINUSE;
-        }        
+        }
         BString fullpath = Fs::getFullPath(thread->process->currentDirectory, name);
         this->destAddress.family = family;
         strncpy(this->destAddress.data, fullpath.c_str(), sizeof(this->destAddress.data));
@@ -541,6 +612,13 @@ U32 KUnixSocketObject::bind(KThread* thread, const KFileDescriptorPtr& fd, U32 a
         std::shared_ptr<KUnixSocketObject> s = std::dynamic_pointer_cast<KUnixSocketObject>(fd->kobject);
         socketNode->kobject = fd->kobject;
         s->node = socketNode;
+        // DGRAM delivery resolves a destination by address via the registry (a
+        // pathname dgram socket has a VFS node too, but autobind ones don't, so a
+        // uniform registry covers both). Record the bound path for reply routing.
+        if (this->type == K_SOCK_DGRAM) {
+            this->boundPath = fullpath;
+            KUnixSocketObject::registerBoundDgram(fullpath, s);
+        }
         return 0;
     }
     return -K_EAFNOSUPPORT;
@@ -825,6 +903,11 @@ U32 KUnixSocketObject::setsockopt(KThread* thread, const KFileDescriptorPtr& fd,
                 this->sendLen = memory->readd(value);
                 break;
             case K_SO_PASSCRED:
+                // Enable SCM_CREDENTIALS delivery on recv. darlingserver sets this
+                // and reads the sender pid from each datagram's creds to identify
+                // the process; without honoring it the server can't attribute the
+                // checkin to mldr's pid.
+                this->soPassCred = (len >= 4) ? (memory->readd(value) != 0) : true;
                 break;
             case K_SO_ATTACH_FILTER:
                 break;
@@ -890,10 +973,98 @@ U32 KUnixSocketObject::writePipeClosed(KThread* thread, bool noSignal) {
     return -K_CONTINUE;
 }
 
+// Build a single atomic datagram (no per-iovec framing — a dgram is one message)
+// from the msghdr's iovecs, plus any SCM_RIGHTS fds, then route it to the
+// destination dgram socket named by destAddr (sendto) or msg_name (sendmsg) or
+// the connected destAddress. Returns the payload byte count on success.
+U32 KUnixSocketObject::dgramSend(KThread* thread, U32 destAddr, U32 destLen, std::shared_ptr<KSocketMsg> msg, bool /*nameFromHdr*/) {
+    // Resolve destination path: explicit address wins, else the connected peer.
+    BString destPath;
+    if (destAddr) {
+        destPath = socketAddressName(thread->memory, destAddr, destLen);
+    }
+    if (destPath.length() == 0) {
+        if (this->connected && this->destAddress.data[0]) {
+            destPath = BString::copy(this->destAddress.data);
+        } else {
+            return -K_ENOTCONN;
+        }
+    }
+    // Absolute-ify a relative dest path the same way bind/connect do, so the
+    // registry key matches the bound full path.
+    if (destPath.length() && destPath.c_str()[0] != '/' && destPath.c_str()[0] != '@') {
+        destPath = Fs::getFullPath(thread->process->currentDirectory, destPath);
+    }
+    std::shared_ptr<KUnixSocketObject> dest = KUnixSocketObject::findBoundDgram(destPath);
+    if (getenv("BW64_DGRAM")) {
+        klog_fmt("DGRAM send pid=%d destAddr=0x%x destLen=%d destPath='%s' found=%d",
+                 (int)thread->process->id, destAddr, destLen, destPath.c_str(), dest ? 1 : 0);
+    }
+    if (!dest) {
+        return -K_ECONNREFUSED;
+    }
+    // Stamp the sender's return address + credentials onto the datagram. Autobind
+    // ourselves first if unbound so a reply can come back.
+    this->ensureAutobind();
+    msg->hasSender = true;
+    msg->senderPath = this->boundPath;
+    msg->senderPid = thread->process->id;
+    msg->senderUid = thread->process->userId;
+    msg->senderGid = thread->process->groupId;
+    U32 payload = (U32)msg->data.size();
+    {
+        BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(dest->lockCond);
+        dest->msgs.push(msg);
+        BOXEDWINE_CONDITION_SIGNAL_ALL(dest->lockCond);
+    }
+    return payload;
+}
+
 U32 KUnixSocketObject::sendmsg(KThread* thread, const KFileDescriptorPtr& fd, U32 address, U32 flags) {
     MsgHdr hdr = {};
     KMemory* memory = thread->memory;
     U32 result = 0;
+
+    // SOCK_DGRAM: connectionless. Build one atomic datagram and deliver it to the
+    // socket bound at the destination address (msg_name or the connected peer).
+    // This is the path darlingserver's mldr rpc checkin uses.
+    if (this->type == K_SOCK_DGRAM) {
+        flags &= ~K_MSG_NOSIGNAL;
+        readMsgHdr(thread, address, &hdr);
+        std::shared_ptr<KSocketMsg> msg = std::make_shared<KSocketMsg>();
+        // SCM_RIGHTS fds. The 64-bit shim (sys_sendmsg64) has already flattened the
+        // guest's cmsg into the object's compact form: one 16-byte record per fd,
+        // {len=16, level, type, fd@+12}, with msg_controllen = nfds*16. Iterate
+        // those records (same convention as the stream path). Any SCM_CREDENTIALS
+        // the guest sent is dropped here; we synthesize creds on the receive side.
+        if (hdr.msg_control) {
+            for (U32 i = 0; i < hdr.msg_controllen / 16; i++) {
+                CMsgHdr cmsg;
+                readCMsgHdr(thread, hdr.msg_control + 16 * i, &cmsg);
+                if (cmsg.cmsg_level != K_SOL_SOCKET || cmsg.cmsg_type != K_SCM_RIGHTS) {
+                    continue;
+                }
+                KFileDescriptorPtr f = thread->process->getFileDescriptor(memory->readd(hdr.msg_control + 16 * i + 12));
+                if (f) {
+                    KSocketMsgObject d;
+                    d.object = f->kobject;
+                    d.accessFlags = f->accessFlags;
+                    msg->objects.push_back(d);
+                }
+            }
+        }
+        // Concatenate all iovecs into one contiguous datagram payload.
+        for (U32 i = 0; i < hdr.msg_iovlen; i++) {
+            U32 p = memory->readd(hdr.msg_iov + 8 * i);
+            U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
+            while (len) {
+                msg->data.push_back(memory->readb(p++));
+                len--;
+            }
+        }
+        return this->dgramSend(thread, hdr.msg_name, hdr.msg_namelen, msg, true);
+    }
+
     std::shared_ptr<KUnixSocketObject> con = this->connection.lock();
 
     if (!con) {
@@ -1015,6 +1186,113 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
     U32 result = 0;
     KMemory* memory = thread->memory;
 
+    // SOCK_DGRAM: pull one atomic datagram from our msgs queue. Unlike the stream
+    // path, the payload is unframed; we also fill msg_name with the sender's
+    // address (for replies) and synthesize SCM_CREDENTIALS when SO_PASSCRED is on
+    // (darlingserver identifies the sender process by the pid in those creds).
+    if (this->type == K_SOCK_DGRAM) {
+        BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
+        if (getenv("BW64_DGRAM")) {
+            klog_fmt("DGRAM recvmsg pid=%d this=%p boundPath='%s' msgs=%d blocking=%d flags=0x%x",
+                     (int)thread->process->id, (void*)this, this->boundPath.c_str(),
+                     (int)this->msgs.size(), (int)this->blocking, flags);
+        }
+        while (!this->msgs.size()) {
+            if (this->inClosed) {
+                return 0;
+            }
+            if (!this->blocking) {
+                return -K_EWOULDBLOCK;
+            }
+            BOXEDWINE_CONDITION_WAIT(this->lockCond);
+#ifdef BOXEDWINE_MULTI_THREADED
+            if (thread->terminating) {
+                return -K_EINTR;
+            }
+            if (thread->startSignal) {
+                thread->startSignal = false;
+                return -K_CONTINUE;
+            }
+#endif
+        }
+        bool peek = (flags & K_MSG_PEEK) != 0;
+        readMsgHdr(thread, address, &hdr);
+        std::shared_ptr<KSocketMsg> msg = this->msgs.front();
+        if (!peek) {
+            this->msgs.pop();
+        }
+
+        // Sender address -> msg_name (sockaddr_un: family + NUL-terminated path).
+        if (hdr.msg_name && hdr.msg_namelen >= 2) {
+            memory->writew(hdr.msg_name, K_AF_UNIX);
+            U32 cap = hdr.msg_namelen > 2 ? hdr.msg_namelen - 2 : 0;
+            const char* sp = msg->senderPath.c_str();
+            U32 slen = (U32)msg->senderPath.length();
+            if (slen + 1 < cap) cap = slen + 1;
+            for (U32 i = 0; i < cap; i++) {
+                memory->writeb(hdr.msg_name + 2 + i, (i < slen) ? (U8)sp[i] : 0);
+            }
+            memory->writed(address + 4, 2 + slen + 1); // msg_namelen actual
+        } else if (hdr.msg_name) {
+            memory->writed(address + 4, 0);
+        }
+
+        // Control: SCM_CREDENTIALS (if requested via SO_PASSCRED) followed by
+        // SCM_RIGHTS for any passed fds. Linux cmsg layout: each header is
+        // {len(4), level(4), type(4)} then data, aligned to 8. ucred = {pid,uid,gid}.
+        U32 controlWritten = 0;
+        if (hdr.msg_control && hdr.msg_controllen) {
+            U32 c = hdr.msg_control;
+            U32 end = hdr.msg_control + hdr.msg_controllen;
+            if (this->soPassCred && c + 12 + 12 <= end) {
+                memory->writed(c + 0, 12 + 12);       // cmsg_len = hdr(12)+ucred(12)
+                memory->writed(c + 4, K_SOL_SOCKET);
+                memory->writed(c + 8, K_SCM_CREDENTIALS);
+                memory->writed(c + 12, msg->senderPid);
+                memory->writed(c + 16, msg->senderUid);
+                memory->writed(c + 20, msg->senderGid);
+                U32 adv = (12 + 12 + 7) & ~7u;        // align to 8
+                c += adv;
+                controlWritten += adv;
+            }
+            if (!msg->objects.empty() && c + 16 <= end) {
+                U32 maxFds = (end - c >= 16) ? (end - c - 12) / 4 : 0;
+                U32 nfds = (U32)msg->objects.size();
+                if (nfds > maxFds) nfds = maxFds;
+                memory->writed(c + 0, 12 + nfds * 4);
+                memory->writed(c + 4, K_SOL_SOCKET);
+                memory->writed(c + 8, K_SCM_RIGHTS);
+                for (U32 i = 0; i < nfds; i++) {
+                    KFileDescriptorPtr recvFd = thread->process->allocFileDescriptor(msg->objects[i].object, msg->objects[i].accessFlags, 0, -1, 0);
+                    memory->writed(c + 12 + i * 4, recvFd->handle);
+                }
+                U32 adv = (12 + nfds * 4 + 7) & ~7u;
+                c += adv;
+                controlWritten += adv;
+            }
+        }
+        if (hdr.msg_control || hdr.msg_controllen) {
+            memory->writed(address + 20, controlWritten); // msg_controllen actual
+        }
+
+        // Payload into the iovecs (truncate to fit; set MSG_TRUNC if it overflows).
+        U32 pos = 0;
+        U32 total = (U32)msg->data.size();
+        for (U32 i = 0; i < hdr.msg_iovlen && pos < total; i++) {
+            U32 p = memory->readd(hdr.msg_iov + 8 * i);
+            U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
+            U32 count = std::min(len, total - pos);
+            memory->memcpy(p, msg->data.data() + pos, count);
+            pos += count;
+            result += count;
+        }
+        // msg_flags: report MSG_TRUNC if the datagram didn't fit.
+        if (hdr.msg_name || hdr.msg_iovlen) {
+            memory->writed(address + 24, (pos < total) ? K_MSG_TRUNC : 0);
+        }
+        return result;
+    }
+
     BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
     while (!this->msgs.size()) {
         if (this->recvBuffer.size_used()) {
@@ -1099,12 +1377,72 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
 }
 
 U32 KUnixSocketObject::sendto(KThread* thread, const KFileDescriptorPtr& fd, U32 message, U32 length, U32 flags, U32 dest_addr, U32 dest_len) {
-    return 0;
+    if (this->type == K_SOCK_DGRAM) {
+        KMemory* memory = thread->memory;
+        if (!memory->canRead(message, length)) {
+            return -K_EFAULT;
+        }
+        std::shared_ptr<KSocketMsg> msg = std::make_shared<KSocketMsg>();
+        msg->data.resize(length);
+        for (U32 i = 0; i < length; i++) {
+            msg->data[i] = memory->readb(message + i);
+        }
+        return this->dgramSend(thread, dest_addr, dest_len, msg, false);
+    }
+    // Stream sendto ignores the address; fall back to a plain write.
+    return this->write(thread, message, length);
 }
 
 U32 KUnixSocketObject::recvfrom(KThread* thread, const KFileDescriptorPtr& fd, U32 buffer, U32 length, U32 flags, U32 address, U32 address_len) {
-    if (address == 0) {        
+    if (this->type == K_SOCK_DGRAM) {
+        KMemory* memory = thread->memory;
+        BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
+        while (!this->msgs.size()) {
+            if (this->inClosed) {
+                return 0;
+            }
+            if (!this->blocking) {
+                return -K_EWOULDBLOCK;
+            }
+            BOXEDWINE_CONDITION_WAIT(this->lockCond);
+#ifdef BOXEDWINE_MULTI_THREADED
+            if (thread->terminating) {
+                return -K_EINTR;
+            }
+            if (thread->startSignal) {
+                thread->startSignal = false;
+                return -K_CONTINUE;
+            }
+#endif
+        }
+        bool peek = (flags & K_MSG_PEEK) != 0;
+        std::shared_ptr<KSocketMsg> msg = this->msgs.front();
+        if (!peek) {
+            this->msgs.pop();
+        }
+        U32 count = std::min(length, (U32)msg->data.size());
+        if (count) {
+            memory->memcpy(buffer, msg->data.data(), count);
+        }
+        // Fill the sender address if the caller wants it.
+        if (address && address_len) {
+            U32 cap = memory->readd(address_len);
+            if (cap >= 2) {
+                memory->writew(address, K_AF_UNIX);
+                const char* sp = msg->senderPath.c_str();
+                U32 slen = (U32)msg->senderPath.length();
+                U32 room = cap - 2;
+                if (slen + 1 < room) room = slen + 1;
+                for (U32 i = 0; i < room; i++) {
+                    memory->writeb(address + 2 + i, (i < slen) ? (U8)sp[i] : 0);
+                }
+            }
+            memory->writed(address_len, 2 + (U32)msg->senderPath.length() + 1);
+        }
+        return count;
+    }
+    if (address == 0) {
         return read(thread, buffer, length, flags);
     }
-    return 0;
+    return read(thread, buffer, length, flags);
 }
