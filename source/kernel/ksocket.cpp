@@ -176,6 +176,15 @@ S32 ksocketpairFds(KThread* thread, U32 af, U32 type, U32 protocol, U32 flags, F
         kwarn_fmt("socketpair with adress family %d not implemented", af);
         return -1;
     }
+    // darlingserver creates its kqueue Mach-port channel as an AF_UNIX
+    // SOCK_SEQPACKET pair (kqchan_mach_port_open). We don't model SEQPACKET's
+    // record framing separately; a connected AF_UNIX STREAM pair carries the
+    // same bytes bidirectionally, which is all the channel needs. So map
+    // SEQPACKET onto STREAM here (every internal `type == K_SOCK_STREAM` path
+    // then applies). Without this, kqchan setup fails -> launchd asserts (UD2).
+    if (type == K_SOCK_SEQPACKET) {
+        type = K_SOCK_STREAM;
+    }
     if (type!=K_SOCK_DGRAM && type!=K_SOCK_STREAM) {
         kwarn_fmt("socketpair with type %d not implemented", type);
         return -1;

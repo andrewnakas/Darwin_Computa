@@ -1870,6 +1870,52 @@ U32 CPU64::step() {
             return used;
         }
 
+        // 0F C7 /1 — CMPXCHG8B m64 (no REX.W) / CMPXCHG16B m128 (REX.W).
+        // Compares EDX:EAX (or RDX:RAX) against the memory operand; if equal,
+        // stores ECX:EBX (or RCX:RBX) and sets ZF=1; otherwise loads the memory
+        // value into EDX:EAX (RDX:RAX) and clears ZF. Darwin's libplatform /
+        // libdispatch atomics (and C11 _Atomic 128-bit ops) use CMPXCHG16B
+        // heavily — launchd's Mach-port bookkeeping hits it right after the first
+        // mach_port_allocate. Memory operand only (reg form is #UD); make the
+        // read-compare-write atomic across host threads like the other CMPXCHG.
+        if (op2 == 0xC7) {
+            ModRM m = decodeModRM(rip + opOff + 2, p, 0);
+            U8 sub = m.regField & 0x7;
+            if (sub == 1 && !m.isReg) {
+                std::unique_lock<std::recursive_mutex> atomicLock(cpu64AtomicLockFor(m.effAddr));
+                if (rexW) {
+                    // CMPXCHG16B: 128-bit operand = two 64-bit words (lo @ +0).
+                    U64 lo = memory->readq(m.effAddr);
+                    U64 hi = memory->readq(m.effAddr + 8);
+                    if (lo == reg[X64_RAX].u64 && hi == reg[X64_RDX].u64) {
+                        memory->writeq(m.effAddr,     reg[X64_RBX].u64);
+                        memory->writeq(m.effAddr + 8, reg[X64_RCX].u64);
+                        rflags |= X64_ZF;
+                    } else {
+                        reg[X64_RAX].setU64(lo);
+                        reg[X64_RDX].setU64(hi);
+                        rflags &= ~X64_ZF;
+                    }
+                } else {
+                    // CMPXCHG8B: 64-bit operand = EDX:EAX vs m64; store ECX:EBX.
+                    U64 cur = memory->readq(m.effAddr);
+                    U64 cmp = ((U64)reg[X64_RDX].u32 << 32) | (U64)reg[X64_RAX].u32;
+                    if (cur == cmp) {
+                        U64 nv = ((U64)reg[X64_RCX].u32 << 32) | (U64)reg[X64_RBX].u32;
+                        memory->writeq(m.effAddr, nv);
+                        rflags |= X64_ZF;
+                    } else {
+                        reg[X64_RAX].setU64((U32)(cur & 0xffffffffULL));
+                        reg[X64_RDX].setU64((U32)(cur >> 32));
+                        rflags &= ~X64_ZF;
+                    }
+                }
+                U32 used = opOff + 2 + m.length;
+                rip += used;
+                return used;
+            }
+        }
+
         // 0F A3 /r — BT  r/m, r       (test bit, no modify)
         // 0F AB /r — BTS r/m, r       (set bit, return old in CF)
         // 0F B3 /r — BTR r/m, r       (reset bit)

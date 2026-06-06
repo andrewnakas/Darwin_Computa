@@ -1820,6 +1820,19 @@ U32 KProcess::clone64(KThread* thread, U64 flags, U64 child_stack, U64 ptid, U64
     }
 
     KThread* newThread = this->createThread();
+    // If this process lives in a pid namespace, a newly cloned (non-leader)
+    // thread gets its own ns-relative tid from the namespace root's counter, so
+    // gettid() on it returns an ns view distinct from the leader's nsTid (==nsPid)
+    // and from sibling processes' pids — matching Linux, where tids and pids share
+    // one per-namespace number space.
+    if (this->nsPid) {
+        KProcessPtr root = (this->nsRootId == this->id)
+            ? shared_from_this()
+            : KSystem::getProcess(this->nsRootId);
+        if (root) {
+            newThread->nsTid = root->nsNextPid++;
+        }
+    }
     // New per-thread CPU64 sharing this process's one memory64.
     CPU64* parentCpu = thread->cpu64 ? thread->cpu64 : this->cpu64;
     CPU64* childCpu = new CPU64(this->memory64);
@@ -1973,6 +1986,15 @@ U32 KProcess::forkProcess64(KThread* thread, U64 flags, U64 ctid, U64 ptid) {
             newProcess->nsParentId = this->nsPid;
         }
         callerSeesGlobalPid = false;       // caller is inside the same namespace
+    }
+    // The new process's main thread IS its thread-group leader, so within the
+    // namespace its tid equals the tgid (nsPid). Stamp nsTid so a later
+    // gettid() on this thread returns the ns view and matches getpid(). (mldr's
+    // runtime aborts if getpid() != gettid() on the main thread — which the
+    // session-4 nsPid getpid() change otherwise broke, since gettid stayed the
+    // flat tid.) Survives the mldr->launchd in-place re-exec (thread-resident).
+    if (newProcess->nsPid) {
+        newThread->nsTid = newProcess->nsPid;
     }
 
     scheduleThread(newThread);

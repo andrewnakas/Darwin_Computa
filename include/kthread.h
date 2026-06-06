@@ -114,6 +114,12 @@ public:
     U32 clockNanoSleep(U32 clock, U32 flags, U64 nano, U32 addressRemain);
 
     U32 id = 0;
+    // PID-namespace-relative thread id (CLONE_NEWPID overlay). 0 == not in a
+    // namespace -> gettid() returns the flat emulator `id`. When set, gettid()
+    // returns this. The thread-group leader of an ns process has nsTid == the
+    // process's nsPid, so the Linux/Darwin invariant getpid()==gettid() holds on
+    // the main thread (mldr asserts exactly this right after dyld checkin).
+    U32 nsTid = 0;
     U64 sigMask = 0; // :TODO: what happens when this is changed while in a signal
     U64 inSigMask = 0;
     U32 alternateStack = 0;

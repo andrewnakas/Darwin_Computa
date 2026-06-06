@@ -27,6 +27,9 @@
 #include <unordered_map>
 #include "../x11wire/xwireserver.h"
 #include "../x11wire/xwireconnection.h"
+#ifdef BOXEDWINE_DARWIN
+#include "darwin/dyldsym.h"
+#endif
 
 KUnixSocketObject::KUnixSocketObject(U32 domain, U32 type, U32 protocol) : KSocketObject(KTYPE_UNIX_SOCKET, domain, type, protocol), 
     lockCond(std::make_shared<BoxedWineCondition>(B("KUnixSocketObject::lockCond"))), recvBuffer(128)
@@ -1013,6 +1016,13 @@ U32 KUnixSocketObject::dgramSend(KThread* thread, U32 destAddr, U32 destLen, std
     if (!dest) {
         return -K_ECONNREFUSED;
     }
+#ifdef BOXEDWINE_DARWIN
+    // Bring-up symbolizer: catch the mldr->darlingserver set_dyld_info RPC and
+    // stash its dyld_all_image_infos pointer so an abort can be symbolized.
+    if (getenv("BW64_ABRTBT") && !msg->data.empty()) {
+        bw64_sniffDyldInfoRpc(thread->process->id, msg->data.data(), (U64)msg->data.size());
+    }
+#endif
     // Stamp the sender's return address + credentials onto the datagram. Autobind
     // ourselves first if unbound so a reply can come back.
     this->ensureAutobind();

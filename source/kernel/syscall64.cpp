@@ -28,6 +28,7 @@
 #include "../opengl/gl64bridge_abi.h"
 #ifdef BOXEDWINE_DARWIN
 #include "devmach.h"
+#include "darwin/dyldsym.h"
 #endif
 #endif
 
@@ -882,13 +883,32 @@ static U64 sys_getrandom64(CPU64* cpu, U64 bufAddr, U64 buflen, U64 /*flags*/) {
     return buflen;
 }
 
-// prlimit64(pid, resource, new_limit*, old_limit*) — for v1 we always pretend
-// "no limit" by writing RLIM64_INFINITY to old_limit if requested.
-static U64 sys_prlimit64_64(CPU64* cpu, U64 /*pid*/, U64 /*res*/, U64 newLim, U64 oldLim) {
+// Linux resource numbers we care about reporting a *finite* limit for.
+#define K_RLIMIT_NOFILE 7
+// A realistic open-file limit. RLIMIT_NOFILE MUST NOT be reported as
+// RLIM_INFINITY: Darling's libkqueue sizes its fd->kqueue map as
+// `map_new(rlim_max)` and mmaps `rlim_max * sizeof(void*)` bytes. With an
+// infinite (~UINT_MAX) max that becomes a ~32 GB sparse mmap, and the resulting
+// map then fails (kqueue() -> -1), which makes launchd_runtime_init's
+// `assert(kqueue() != -1)` fire (UD2). Report the conventional macOS OPEN_MAX so
+// the map is a sane ~80 KB and kqueue() succeeds. (Linux default hard cap is
+// often 1048576; macOS userland expects ~10240, which Darling targets.)
+#define K_RLIMIT_NOFILE_CUR 10240ULL
+#define K_RLIMIT_NOFILE_MAX 10240ULL
+
+// prlimit64(pid, resource, new_limit*, old_limit*). We don't enforce limits, so
+// we report "no limit" (RLIM64_INFINITY) for everything EXCEPT RLIMIT_NOFILE,
+// which must be finite (see the NOFILE note above).
+static U64 sys_prlimit64_64(CPU64* cpu, U64 /*pid*/, U64 res, U64 newLim, U64 oldLim) {
     if (oldLim) {
         // struct rlimit64 { __u64 rlim_cur; __u64 rlim_max; }
-        cpu->memory->writeq(oldLim, ~0ULL);
-        cpu->memory->writeq(oldLim + 8, ~0ULL);
+        if (res == K_RLIMIT_NOFILE) {
+            cpu->memory->writeq(oldLim, K_RLIMIT_NOFILE_CUR);
+            cpu->memory->writeq(oldLim + 8, K_RLIMIT_NOFILE_MAX);
+        } else {
+            cpu->memory->writeq(oldLim, ~0ULL);
+            cpu->memory->writeq(oldLim + 8, ~0ULL);
+        }
     }
     (void)newLim;
     return 0;
@@ -3376,6 +3396,33 @@ void ksyscall64(CPU64* cpu) {
                             if (w >= 0x100000000ULL && w < 0x800000000ULL)
                                 klog_fmt("ABRTBT:   [rsp+0x%x]=0x%llx", i * 8, (unsigned long long)w);
                         }
+                        // The abort actually originates in the HOST glibc linked
+                        // into mldr/launchd (the RIP is libc's pthread_kill, called
+                        // from raise() from abort()). glibc stashes the abort
+                        // message in its global `__abort_msg` pointer. The faulting
+                        // RIP is pthread_kill+0x11c, and pthread_kill sits at libc
+                        // vaddr 0x9ea10, so libc base = RIP - 0x9eb2c; __abort_msg
+                        // global is at libc vaddr 0x204b40 and points to
+                        //   struct { unsigned size; unsigned unused; char msg[]; }
+                        // (string at +8). Print it — it names the assert directly.
+                        {
+                            U64 libcBase = cpu->rip - 0x9eb2cULL;
+                            U64 abortMsgPtr = cpu->memory->readq(libcBase + 0x204b40ULL);
+                            klog_fmt("ABRTBT: glibc base=0x%llx __abort_msg=0x%llx",
+                                     (unsigned long long)libcBase, (unsigned long long)abortMsgPtr);
+                            if (abortMsgPtr >= 0x1000) {
+                                char msg[512] = {0};
+                                cpu->memory->memcpyFromGuest(msg, abortMsgPtr + 8, sizeof(msg) - 1);
+                                klog_fmt("ABRTBT: glibc abort message: %s", msg);
+                            }
+                        }
+#ifdef BOXEDWINE_DARWIN
+                        // Symbolize the abort RIP (and the in-range stack frames)
+                        // against the guest's dyld_all_image_infos image list.
+                        if (cpu->thread && cpu->thread->process) {
+                            bw64_dumpDyldImages(cpu->thread->process->id, cpu->rip);
+                        }
+#endif
                     }
                     cpu->yield = true;
                     if (cpu->thread && cpu->thread->process) {
@@ -3986,10 +4033,17 @@ void ksyscall64(CPU64* cpu) {
         case X64_SYS_getrlimit:
             // getrlimit(resource, struct rlimit* {unsigned long cur,max}).
             // wine's unix ntdll queries RLIMIT_STACK/NOFILE/AS during thread
-            // setup. Pretend "no limit" (RLIM_INFINITY) like prlimit64 does.
+            // setup. Pretend "no limit" (RLIM_INFINITY) — except RLIMIT_NOFILE,
+            // which must be finite (Darling's libkqueue sizes a map from it; see
+            // the note on sys_prlimit64_64).
             if (a2) {
-                cpu->memory->writeq(a2, ~0ULL);
-                cpu->memory->writeq(a2 + 8, ~0ULL);
+                if (a1 == K_RLIMIT_NOFILE) {
+                    cpu->memory->writeq(a2, K_RLIMIT_NOFILE_CUR);
+                    cpu->memory->writeq(a2 + 8, K_RLIMIT_NOFILE_MAX);
+                } else {
+                    cpu->memory->writeq(a2, ~0ULL);
+                    cpu->memory->writeq(a2 + 8, ~0ULL);
+                }
             }
             ret = 0;
             break;
@@ -4092,7 +4146,15 @@ void ksyscall64(CPU64* cpu) {
             }
             break;
         case X64_SYS_gettid:
-            ret = cpu->thread ? cpu->thread->id : 1;
+            // PID-namespace view (mirrors getpid above): a thread inside a pid
+            // namespace reports its ns-relative tid. The ns process's main thread
+            // has nsTid == nsPid, so getpid()==gettid() holds on it — mldr's
+            // runtime asserts exactly that right after the dyld checkin.
+            if (cpu->thread && cpu->thread->nsTid) {
+                ret = cpu->thread->nsTid;
+            } else {
+                ret = cpu->thread ? cpu->thread->id : 1;
+            }
             break;
         case X64_SYS_futex:
             ret = sys_futex64(cpu, a1, (U32)a2, (U32)a3, a4, (U32)a6);
