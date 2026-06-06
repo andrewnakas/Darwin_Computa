@@ -145,6 +145,31 @@ void StartUpArgs::buildVirtualFileSystem() {
     Fs::addVirtualFile(B("/dev/mach"), openDevMach, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(10, 0), devNode);
 #endif
     Fs::addVirtualFile(B("/dev/zero"), openDevZero, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(1, 5), devNode);
+#ifdef BOXEDWINE_DARWIN
+    // The Darwin prefix is run under mldr's vchroot at /usr/libexec/darling, so
+    // the guest's "/dev/urandom" is rewritten in guest userspace to the prefixed
+    // path "/usr/libexec/darling/dev/urandom" BEFORE the openat syscall reaches
+    // us. The bare /dev/* virtual nodes above are therefore invisible inside the
+    // vchroot. The prefix has no /dev in the zip (a zip can't carry device
+    // nodes), so launchd/services that open /dev/urandom (arc4random/
+    // CommonCrypto), /dev/null (launchd's testfd_or_openfd), etc. get ENOENT.
+    // Mirror the essential character devices at the prefixed path so they
+    // resolve through the vchroot. The /usr/libexec/darling tree is staged, so
+    // its node exists; create the prefixed dev dir under it.
+    std::shared_ptr<FsNode> darwinPrefixNode = Fs::getNodeFromLocalPath(B(""), B("/usr/libexec/darling"), true);
+    if (darwinPrefixNode) {
+        std::shared_ptr<FsNode> darwinDevNode = Fs::getNodeFromLocalPath(B(""), B("/usr/libexec/darling/dev"), true);
+        if (!darwinDevNode) {
+            darwinDevNode = Fs::addFileNode(B("/usr/libexec/darling/dev"), B(""), B(""), true, darwinPrefixNode);
+        }
+        if (darwinDevNode) {
+            Fs::addVirtualFile(B("/usr/libexec/darling/dev/urandom"), openDevURandom, K__S_IREAD|K__S_IFCHR, k_mdev(1, 9), darwinDevNode);
+            Fs::addVirtualFile(B("/usr/libexec/darling/dev/random"), openDevURandom, K__S_IREAD|K__S_IFCHR, k_mdev(1, 8), darwinDevNode);
+            Fs::addVirtualFile(B("/usr/libexec/darling/dev/null"), openDevNull, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(1, 3), darwinDevNode);
+            Fs::addVirtualFile(B("/usr/libexec/darling/dev/zero"), openDevZero, K__S_IREAD|K__S_IWRITE|K__S_IFCHR, k_mdev(1, 5), darwinDevNode);
+        }
+    }
+#endif
     Fs::addVirtualFile(B("/proc/meminfo"), openMemInfo, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
     Fs::addVirtualFile(B("/proc/stat"), openProcStat, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
     Fs::addVirtualFile(B("/proc/uptime"), openUptime, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
