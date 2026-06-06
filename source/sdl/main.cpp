@@ -280,6 +280,27 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
     // (argc>=6 or it prints "not meant to be started manually"; it also requires
     // uid/gid 0 — provided by KSystem::darwinMode). This is how the bring-up
     // harness drives the server independently of mldr. pipe fd -1 = none.
+    // BW64_DSLOG: surface darlingserver's own log (calls/procmem/etc. error
+    // lines) on stderr so it lands in our boot log inline, instead of the
+    // prefix's private/var/log/dserver.log. Invaluable for seeing which RPC the
+    // server rejected when launchd aborts.
+    if (std::getenv("BW64_DSLOG")) {
+        a.envValues.push_back(BString::copy("DSERVER_LOG_STDERR=1"));
+        const char* lvl = std::getenv("BW64_DSLOG_LEVEL");
+        a.envValues.push_back(BString::copy(lvl && lvl[0]
+            ? (std::string("DSERVER_LOG_LEVEL=") + lvl).c_str()
+            : "DSERVER_LOG_LEVEL=debug"));
+    }
+    // BW64_DYLDLOG: ask the guest dyld to narrate image loading + initializers
+    // + API calls. When launchd aborts inside an image initializer, the last
+    // "running initializer for <dylib>" line names the culprit image directly.
+    if (std::getenv("BW64_DYLDLOG")) {
+        a.envValues.push_back(BString::copy("DYLD_PRINT_INITIALIZERS=1"));
+        a.envValues.push_back(BString::copy("DYLD_PRINT_LIBRARIES=1"));
+        a.envValues.push_back(BString::copy("DYLD_PRINT_APIS=1"));
+        a.envValues.push_back(BString::copy("DYLD_PRINT_SEGMENTS=1"));
+    }
+
     BString first = guestArgs[0];
     if (first.endsWith("darlingserver")) {
         a.addArg(first);

@@ -791,6 +791,28 @@ static U64 sys_shmctl64(CPU64* cpu, U64 shmid, U64 cmd, U64 buf) {
 // wineserver to see one client's full disconnect before the next begins.
 // Recursive so an exitgroup that internally drives sibling teardown can't
 // self-deadlock. Env-gated so it's a clean A/B with no cost when off.
+// Does signal `sig`'s DEFAULT disposition kill the process? (Linux semantics.)
+// Used when a self-directed signal (raise/abort via tgkill/kill) has no handler:
+// fatal-default => terminate the process; ignore/stop-default => drop it.
+// Default-IGNORE: SIGCHLD, SIGCONT, SIGURG, SIGWINCH. Default-STOP: SIGSTOP,
+// SIGTSTP, SIGTTIN, SIGTTOU (we don't job-control, so treat as non-fatal/drop).
+// Everything else with a meaningful default terminates.
+static bool sigDefaultIsFatal(U32 sig) {
+    switch (sig) {
+        case 17:  // SIGCHLD  (default: ignore)
+        case 18:  // SIGCONT  (default: continue)
+        case 23:  // SIGURG   (default: ignore)
+        case 28:  // SIGWINCH (default: ignore)
+        case 19:  // SIGSTOP  (default: stop — no job control here, drop)
+        case 20:  // SIGTSTP
+        case 21:  // SIGTTIN
+        case 22:  // SIGTTOU
+            return false;
+        default:
+            return (sig >= 1 && sig <= 64);
+    }
+}
+
 static std::recursive_mutex g_serialTeardownMutex;
 static bool g_serialTeardownInit = false, g_serialTeardownOn = false;
 static U64 sys_exit64(CPU64* cpu, U64 status, bool group) {
@@ -3329,11 +3351,41 @@ void ksyscall64(CPU64* cpu) {
                 // overwritten by RAX-restore at rt_sigreturn anyway).
                 ret = 0;
             } else {
-                // No handler installed / SIG_DFL / SIG_IGN. For most
-                // signals this should terminate the process; for v1 we
-                // log and return 0 so abort()-paths can be observed.
-                klog_fmt("ksyscall64: tgkill self sig=%u — no handler installed", sig);
-                ret = 0;
+                // No handler installed / SIG_DFL / SIG_IGN. For a signal whose
+                // default action is fatal (SIGABRT from abort(), SIGSEGV, SIGILL,
+                // SIGFPE, SIGKILL, ...) we must terminate the process like the
+                // real kernel — otherwise the guest keeps executing past its own
+                // abort() and runs into garbage (a stray HLT, a re-raise loop).
+                // SIG_IGN'd or non-fatal-default signals (SIGCHLD/SIGURG/SIGWINCH)
+                // are correctly dropped.
+                bool ignored = (sig >= 1 && sig <= 64) &&
+                               cpu->sigActions[sig].installed &&
+                               cpu->sigActions[sig].handler == 1 /*SIG_IGN*/;
+                if (sigDefaultIsFatal(sig) && !ignored) {
+                    klog_fmt("ksyscall64: tgkill self sig=%u (fatal default) — terminating process", sig);
+                    // BW64_ABRTBT: log the abort RIP + any return addresses on the
+                    // stack so the failing image/site can be located. (A Mach-O
+                    // header back-walk was tried and removed — this Darling dyld
+                    // does not keep image headers contiguous with code at runtime,
+                    // so frames must be mapped via the slide trick offline.)
+                    if (getenv("BW64_ABRTBT") && cpu->memory) {
+                        U64 sp = cpu->reg[X64_RSP].u64;
+                        klog_fmt("ABRTBT: RIP=0x%llx RSP=0x%llx", (unsigned long long)cpu->rip, (unsigned long long)sp);
+                        for (int i = 0; i < 48; i++) {
+                            U64 w = cpu->memory->readq(sp + i * 8);
+                            if (w >= 0x100000000ULL && w < 0x800000000ULL)
+                                klog_fmt("ABRTBT:   [rsp+0x%x]=0x%llx", i * 8, (unsigned long long)w);
+                        }
+                    }
+                    cpu->yield = true;
+                    if (cpu->thread && cpu->thread->process) {
+                        cpu->thread->process->exitgroup(cpu->thread, 128 + sig);
+                    }
+                    ret = 0;
+                } else {
+                    klog_fmt("ksyscall64: tgkill self sig=%u — no handler, default non-fatal/ignored", sig);
+                    ret = 0;
+                }
             }
             break;
         }
@@ -3830,6 +3882,12 @@ void ksyscall64(CPU64* cpu) {
             U64 localIov = a2; U64 liovcnt = a3;
             U64 remoteIov = a4; U64 riovcnt = a5;
             KProcessPtr target = KSystem::getProcess(targetPid);
+            if (getenv("BW64_VMRW")) {
+                klog_fmt("VMRW: pid=%d %s target=%u found=%d liovcnt=%llu riovcnt=%llu",
+                         (int)cpu->thread->process->id, isRead ? "readv" : "writev",
+                         targetPid, target ? 1 : 0,
+                         (unsigned long long)liovcnt, (unsigned long long)riovcnt);
+            }
             if (!target) { ret = (U64)-K_ESRCH; break; }
             KMemory64* localMem  = cpu->memory;          // this process's 64-bit mem
             KMemory64* remoteMem = target->memory64;     // target's 64-bit mem
@@ -4023,6 +4081,16 @@ void ksyscall64(CPU64* cpu) {
             break;
         }
         case X64_SYS_getpid:
+            // PID-namespace view: a process forked with CLONE_NEWPID (the
+            // darlingserver launchd container) reports nsPid (==1 for the ns
+            // root) rather than its flat emulator id. launchd's startup guard
+            // and pid1_magic both hinge on the ns root seeing getpid()==1.
+            if (cpu->thread && cpu->thread->process && cpu->thread->process->nsPid) {
+                ret = cpu->thread->process->nsPid;
+            } else {
+                ret = cpu->thread ? cpu->thread->id : 1;
+            }
+            break;
         case X64_SYS_gettid:
             ret = cpu->thread ? cpu->thread->id : 1;
             break;
@@ -4233,8 +4301,20 @@ void ksyscall64(CPU64* cpu) {
             if (deliverSignalSync(cpu, sig)) {
                 ret = 0;
             } else {
-                klog_fmt("ksyscall64: kill self sig=%u — no handler installed", sig);
-                ret = 0;
+                bool ignored = (sig >= 1 && sig <= 64) &&
+                               cpu->sigActions[sig].installed &&
+                               cpu->sigActions[sig].handler == 1 /*SIG_IGN*/;
+                if (sigDefaultIsFatal(sig) && !ignored) {
+                    klog_fmt("ksyscall64: kill self sig=%u (fatal default) — terminating process", sig);
+                    cpu->yield = true;
+                    if (cpu->thread && cpu->thread->process) {
+                        cpu->thread->process->exitgroup(cpu->thread, 128 + sig);
+                    }
+                    ret = 0;
+                } else {
+                    klog_fmt("ksyscall64: kill self sig=%u — no handler, default non-fatal/ignored", sig);
+                    ret = 0;
+                }
             }
             break;
         }
@@ -4539,7 +4619,14 @@ void ksyscall64(CPU64* cpu) {
             ret = 0;
             break;
         case X64_SYS_getppid:
-            ret = cpu->thread && cpu->thread->process ? cpu->thread->process->parentId : 1;
+            // PID-namespace view: the ns root's parent (darlingserver) lives
+            // outside the namespace, so it reports getppid()==0 like a real
+            // PID-1 init. Descendants inside the ns report their parent's nsPid.
+            if (cpu->thread && cpu->thread->process && cpu->thread->process->nsPid) {
+                ret = cpu->thread->process->nsParentId;
+            } else {
+                ret = cpu->thread && cpu->thread->process ? cpu->thread->process->parentId : 1;
+            }
             break;
         case X64_SYS_getpgrp:
         case X64_SYS_getpgid:

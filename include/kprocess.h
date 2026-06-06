@@ -257,6 +257,16 @@ public:
 
     U32 id = 0;
     U32 parentId = 0;
+    // PID-namespace view (Darwin/darlingserver). 0 == not in a private PID
+    // namespace (getpid returns the real flat id). When darlingserver forks the
+    // launchd container with CLONE_NEWPID, that child becomes nsPid==1 and its
+    // descendants get incrementing namespace-relative pids. launchd's startup
+    // guard (`getpid()!=1 && getppid()!=1`) and its pid1_magic both depend on
+    // the namespace root reporting getpid()==1. See [[darwin-computa...]].
+    U32 nsPid = 0;
+    U32 nsParentId = 0;   // namespace-relative parent pid (0 if parent is outside the ns)
+    U32 nsRootId = 0;     // real emulator id of this namespace's root (nsPid==1) process
+    U32 nsNextPid = 0;    // (root only) next namespace-relative pid to hand out
     U32 groupId = 0;
     U32 userId = 0;
     U32 effectiveUserId = 0;

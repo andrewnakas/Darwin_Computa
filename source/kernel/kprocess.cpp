@@ -1942,8 +1942,42 @@ U32 KProcess::forkProcess64(KThread* thread, U64 flags, U64 ctid, U64 ptid) {
         if (ptid) this->memory64->writed(ptid, newProcess->id);
     }
 
+    // PID-namespace semantics (CLONE_NEWPID). darlingserver forks the launchd
+    // container with CLONE_NEWPID|SIGCHLD so launchd genuinely becomes PID 1 in
+    // its own namespace (its `getpid()!=1 && getppid()!=1` guard + pid1_magic
+    // both depend on this). We model a flat-id emulator with a thin namespace
+    // overlay: the NEWPID child becomes its namespace root (nsPid==1); children
+    // forked inside an existing namespace inherit it and get incrementing pids.
+    // callerSeesGlobalPid: fork(2) returns the child pid AS SEEN BY THE CALLER's
+    // namespace. For CLONE_NEWPID the caller (e.g. darlingserver) is in the OUTER
+    // namespace, so it must see the child's GLOBAL emulator id — NOT the child's
+    // internal nsPid (1). darlingserver keys all its bookkeeping + the cross-proc
+    // process_vm_readv(target) on that returned pid, so getting this wrong makes
+    // every later RPC memory read fail with ESRCH/ENOSYS.
+    bool callerSeesGlobalPid = true;
+    if (flags & K_CLONE_NEWPID) {
+        newProcess->nsRootId = newProcess->id;
+        newProcess->nsPid = 1;
+        newProcess->nsParentId = 0;        // parent lives outside this namespace
+        newProcess->nsNextPid = 2;         // next child in the ns gets pid 2
+        callerSeesGlobalPid = true;        // parent is outside the new namespace
+    } else if (this->nsPid) {
+        // Inherit the parent's namespace; allocate the next ns-relative pid from
+        // the namespace root's counter.
+        KProcessPtr root = (this->nsRootId == this->id)
+            ? shared_from_this()
+            : KSystem::getProcess(this->nsRootId);
+        if (root) {
+            newProcess->nsRootId = root->id;
+            newProcess->nsPid = root->nsNextPid++;
+            newProcess->nsParentId = this->nsPid;
+        }
+        callerSeesGlobalPid = false;       // caller is inside the same namespace
+    }
+
     scheduleThread(newThread);
-    return newProcess->id;   // parent sees the child pid
+    return callerSeesGlobalPid ? newProcess->id
+                              : (newProcess->nsPid ? newProcess->nsPid : newProcess->id);
 }
 #endif
 
