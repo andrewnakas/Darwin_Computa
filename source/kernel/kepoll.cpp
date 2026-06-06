@@ -135,6 +135,12 @@ void KEPoll::close() {
 #define K_EPOLL_CTL_DEL 2
 #define K_EPOLL_CTL_MOD 3
 
+// epoll-only event flags (Linux values). EPOLLET requests edge-triggered
+// delivery (report a bit only on a rising edge); EPOLLONESHOT disarms the
+// registration after one delivery until re-armed via EPOLL_CTL_MOD.
+#define K_EPOLLET       0x80000000
+#define K_EPOLLONESHOT  0x40000000
+
 U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
     KFileDescriptorPtr targetFD = KThread::currentThread()->process->getFileDescriptor(fd);
 
@@ -153,6 +159,8 @@ U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
             existing->fd = fd;
             existing->events = memory->readd(address);
             existing->data = memory->readq(address + 4);
+            existing->lastReported = 0;
+            existing->armed = true;
             this->data.set(fd, existing);
             break;
         case K_EPOLL_CTL_DEL:
@@ -166,6 +174,10 @@ U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
                 return -K_ENOENT;
             existing->events = memory->readd(address);
             existing->data = memory->readq(address + 4);
+            // MOD re-arms an EPOLLONESHOT registration and resets the edge state,
+            // so a level that is still asserted is reported again after re-arm.
+            existing->lastReported = 0;
+            existing->armed = true;
             break;
         default:
             return -K_EINVAL;
@@ -178,22 +190,48 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
     U32 pollCount=0;
     KMemory* memory = thread->memory;
 
+    // Build the poll set from the armed registrations. A registration disarmed by
+    // EPOLLONESHOT is skipped entirely until EPOLL_CTL_MOD re-arms it. For an
+    // edge-triggered (EPOLLET) registration we suppress the bits we already
+    // delivered (lastReported) so that a level that stays asserted (e.g. a dgram
+    // socket that is always POLLOUT-ready) does not, by itself, force epoll_wait
+    // to return — exactly the busy-spin darlingserver's EPOLLET listener hit.
     thread->pollData.clear();
+    std::vector<Data*> owners;
     for( const auto& n : this->data ) {
         Data* next = n.value;
+        if (!next->armed) {
+            continue;
+        }
         KPollData pollData;
-        
+
         pollData.events = next->events;
         pollData.fd = next->fd;
         pollData.data = next->data;
+        pollData.suppress = (next->events & K_EPOLLET) ? next->lastReported : 0;
         thread->pollData.push_back(pollData);
-        pollCount++;	
+        owners.push_back(next);
+        pollCount++;
     }
     result = internal_poll(thread, thread->pollData.data(), pollCount, timeout);
     if (result >= 0) {
         result = 0;
-        for (KPollData& data : thread->pollData) {
-            if (data.revents!=0) {
+        for (size_t idx = 0; idx < thread->pollData.size(); idx++) {
+            KPollData& data = thread->pollData[idx];
+            Data* owner = owners[idx];
+            bool edge = (owner->events & K_EPOLLET) != 0;
+
+            // For edge-triggered fds report only the rising-edge bits (those not
+            // already delivered); for level-triggered fds report the full revents.
+            U32 toReport = edge ? (data.revents & ~owner->lastReported) : data.revents;
+
+            // Track delivered bits for ET so a falling-then-rising edge re-fires;
+            // bits no longer asserted are dropped from lastReported.
+            if (edge) {
+                owner->lastReported = data.revents;
+            }
+
+            if (toReport != 0) {
                 if (getenv("BW64_EPDUMP")) {
                     KFileDescriptorPtr fd = thread->process->getFileDescriptor((FD)data.fd);
                     const char* kind = "?";
@@ -216,16 +254,20 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
                     }
                     klog_fmt("EPDUMP wait: fd=%d data=0x%llx revents=0x%x kind=%s inClosed=%d outClosed=%d recvUsed=%ld",
                              (int)data.fd, (unsigned long long)data.data,
-                             (unsigned)data.revents, kind, inC, outC, used);
+                             (unsigned)toReport, kind, inC, outC, used);
                 }
-                memory->writed(events + result * 12, data.revents);
+                memory->writed(events + result * 12, toReport);
                 memory->writeq(events + result * 12 + 4, data.data);
                 result++;
+                // EPOLLONESHOT: disarm until the application re-arms with MOD.
+                if (owner->events & K_EPOLLONESHOT) {
+                    owner->armed = false;
+                }
                 if (result>=(S32)maxevents) {
                     kwarn("possible starvation in epoll, more events are ready than can be received.");
                     break;
                 }
-            }        
+            }
         }
     }
     return result;

@@ -100,7 +100,12 @@ S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout) {
                                      (long)us->debugPendingTotal(), (long)us->debugPendingLive());
                         }
                     }
-                    if (data->revents != 0) {
+                    // For the block-vs-return decision, ignore bits the caller has
+                    // marked as already-delivered (EPOLLET edge suppression). The
+                    // full revents are still reported to the caller; only whether
+                    // we consider this fd "freshly ready" is affected. suppress is
+                    // 0 for poll()/select(), so their semantics are unchanged.
+                    if ((data->revents & ~data->suppress) != 0) {
                         result++;
                     }
                 }

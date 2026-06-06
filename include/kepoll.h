@@ -56,6 +56,13 @@ private:
         U32 fd;
         U64 data;
         U32 events;
+        // Edge-triggered (EPOLLET) bookkeeping: the set of ready bits we last
+        // reported to the application for this fd. An ET event for a given bit is
+        // only delivered on a rising edge (currently-ready bit that was NOT in
+        // lastReported). EPOLLONESHOT disarms the registration (armed=false) after
+        // any delivery until EPOLL_CTL_MOD re-arms it.
+        U32 lastReported = 0;
+        bool armed = true;
     };
     BHashTable<U32, Data*> data;
 };

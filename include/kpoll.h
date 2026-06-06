@@ -28,6 +28,12 @@ public:
     U32 events;
     U32 revents;
     U64 data;
+    // Edge-triggered support (epoll EPOLLET): bits already delivered to the app
+    // that must NOT, on their own, count as "ready" for the purpose of deciding
+    // whether internal_poll returns vs. blocks. Defaults to 0 (level-triggered),
+    // so poll()/select() are unaffected; only KEPoll::wait sets this. The raw
+    // revents are still computed in full so the caller can detect rising edges.
+    U32 suppress = 0;
 };
 
 S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout);

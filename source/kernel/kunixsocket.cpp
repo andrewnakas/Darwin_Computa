@@ -191,6 +191,16 @@ bool KUnixSocketObject::isOpen() {
     if (this->listening) {
         return true;
     }
+    // A connectionless datagram socket is never "connected" in the STREAM sense,
+    // but it is fully usable (open) once created/bound: each datagram is routed
+    // per-message to a destination's queue. Treating it as !open made poll set a
+    // spurious POLLHUP on darlingserver's bound listener dgram (fd revents 0x14 =
+    // POLLHUP|POLLOUT) every iteration -> a perpetual epoll wakeup the server's
+    // EPOLLET listener registration never quiesces -> post-checkin busy spin.
+    // It stays open until explicitly shut down (shutdown() sets both closed flags).
+    if (this->type == K_SOCK_DGRAM) {
+        return !(this->outClosed && this->inClosed);
+    }
     return connected && (!outClosed || !inClosed);
 }
 
