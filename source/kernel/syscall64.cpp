@@ -2421,6 +2421,11 @@ static std::unordered_map<U32, U32> g_msgScratchByThread;
 void bw64_clearMsgScratchForThread(U32 threadId) {
     BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(g_scratchMutex);
     g_msgScratchByThread.erase(threadId);
+    // bounceSockaddrTo32's per-thread scratch (g_socketScratchByThread) lives in
+    // the same replaced 32-bit address space and must be dropped too, or a
+    // post-exec connect/bind/getsockname writes the sockaddr family to the stale
+    // page (addr=0xc0400000, len=2) and faults.
+    g_socketScratchByThread.erase(threadId);
 }
 static U32 msgScratch(KThread* thread) {
     if (!thread || !thread->memory || !thread->process) return 0;
