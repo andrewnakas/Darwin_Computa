@@ -34,6 +34,15 @@ public:
     // so poll()/select() are unaffected; only KEPoll::wait sets this. The raw
     // revents are still computed in full so the caller can detect rising edges.
     U32 suppress = 0;
+    // EPOLLET edge bookkeeping (KEPoll only): points at the owning registration's
+    // persistent lastReported mask. internal_poll ages it EVERY poll cycle —
+    // including the cycle right before it blocks — clearing any delivered bit that
+    // is no longer asserted, so the next rising edge is detected. Without this the
+    // mask froze at last delivery and, after a same-level drain+refill (e.g. a
+    // dgram queue going empty then a new datagram arriving), suppressed the fresh
+    // POLLIN forever -> the parked epoll_wait never woke (the darlingserver wall).
+    // nullptr for poll()/select(), so their level-triggered semantics are intact.
+    U32* suppressWriteback = nullptr;
 };
 
 S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout);

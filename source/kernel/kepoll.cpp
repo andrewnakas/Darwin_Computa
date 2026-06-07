@@ -208,7 +208,12 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
         pollData.events = next->events;
         pollData.fd = next->fd;
         pollData.data = next->data;
-        pollData.suppress = (next->events & K_EPOLLET) ? next->lastReported : 0;
+        bool edge = (next->events & K_EPOLLET) != 0;
+        pollData.suppress = edge ? next->lastReported : 0;
+        // For ET fds let internal_poll age lastReported in place every cycle (it
+        // points straight at the registration's mask). next lives in this->data
+        // for the whole call, so the pointer stays valid across the poll/block.
+        pollData.suppressWriteback = edge ? &next->lastReported : nullptr;
         thread->pollData.push_back(pollData);
         owners.push_back(next);
         pollCount++;

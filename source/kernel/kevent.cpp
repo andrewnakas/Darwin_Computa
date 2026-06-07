@@ -88,6 +88,12 @@ U32 KEvent::writeNative(U8* buffer, U32 len) {
             break;
         }
     }
+    if (getenv("BW64_EVENTFD")) {
+        KThread* t = KThread::currentThread();
+        klog_fmt("EVENTFD write this=%p pid=%d add=%llu -> counter=%llu",
+                 (void*)this, t && t->process ? (int)t->process->id : -1,
+                 (unsigned long long)value, (unsigned long long)counter);
+    }
     return 8;
 }
 
@@ -99,6 +105,12 @@ U32 KEvent::readNative(U8* buffer, U32 len) {
     while (true) {
         if (counter) {
             *((U64*)buffer) = counter;
+            if (getenv("BW64_EVENTFD")) {
+                KThread* t = KThread::currentThread();
+                klog_fmt("EVENTFD read  this=%p pid=%d drained counter=%llu -> 0",
+                         (void*)this, t && t->process ? (int)t->process->id : -1,
+                         (unsigned long long)counter);
+            }
             counter = 0;
             BOXEDWINE_CONDITION_SIGNAL(lockCond);
             return 8;

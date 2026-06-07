@@ -100,6 +100,19 @@ S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout) {
                                      (long)us->debugPendingTotal(), (long)us->debugPendingLive());
                         }
                     }
+                    // Age the EPOLLET edge mask BEFORE the block decision: any bit
+                    // we previously delivered (suppress) that is no longer asserted
+                    // in the freshly-computed revents has fallen, so drop it from
+                    // both the local suppress and the owner's persistent
+                    // lastReported. This runs on every poll cycle — including the
+                    // one right before we block — so a level that drops and re-rises
+                    // (dgram queue drained empty, then a new datagram) is seen as a
+                    // fresh rising edge instead of being masked forever.
+                    if (data->suppressWriteback) {
+                        U32 stillAsserted = data->suppress & data->revents;
+                        data->suppress = stillAsserted;
+                        *data->suppressWriteback = stillAsserted;
+                    }
                     // For the block-vs-return decision, ignore bits the caller has
                     // marked as already-delivered (EPOLLET edge suppression). The
                     // full revents are still reported to the caller; only whether
