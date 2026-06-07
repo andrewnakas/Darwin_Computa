@@ -60,8 +60,11 @@ DSERVER_INIT="$APP" BW64_DSLOG=1 \
 EMU=$!
 
 # Wait until the app has run (it writes stdout) or exits, or we time out.
-for i in $(seq 1 60); do
+# First run is slow (prefix walk + dyld); framework-heavy tools (date) ~140s.
+for i in $(seq 1 110); do
     if grep -q "exit_group syscall, status=.* pid=26" "$LOG" 2>/dev/null; then break; fi
+    # The init process (pid 26) writing stdout means the app produced output.
+    if grep -q "\[guest fd=1 pid=26 " "$LOG" 2>/dev/null; then sleep 2; break; fi
     if ! kill -0 "$EMU" 2>/dev/null; then break; fi
     sleep 2
 done
