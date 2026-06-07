@@ -2470,6 +2470,80 @@ void bw64_clearMsgScratchForThread(U32 threadId) {
     // page (addr=0xc0400000, len=2) and faults.
     g_socketScratchByThread.erase(threadId);
 }
+// Shared core of select(2)/pselect6(2): translate the three fd_set bitmaps into
+// a pollfd array, run kpoll (our real readiness/blocking engine), then translate
+// the revents back into freshly-zeroed fd_sets. timeoutMs follows kpoll's
+// convention (0 == non-blocking, 0xFFFFFFFF == infinite). Returns the select
+// contract: the number of ready bits across all sets, or a negative -errno.
+//
+// Both the BSD select (timeval timeout) and pselect6 (timespec timeout) cases
+// funnel here after normalising their timeout to milliseconds, so neither can
+// regress to the old ENOSYS stub — which is exactly what made launchd's
+// kqueue_demand_loop (a blocking select(mainkq+1,...) with infinite timeout)
+// busy-spin: select=-ENOSYS returned immediately every iteration, the cancelable
+// select wrapper then fired __pthread_canceled(0) (dserver #31) each turn, and
+// launchd never blocked to await/deliver a kqueue (bootstrap) event.
+static S64 doSelect64(CPU64* cpu, U32 nfds, U64 rfdsAddr, U64 wfdsAddr,
+                      U64 efdsAddr, U32 timeoutMs) {
+    if (!cpu->thread || !cpu->thread->process || !cpu->thread->memory) {
+        return -K_ENOSYS;
+    }
+    if (nfds > 1024) return -K_EINVAL;
+
+    U32 setBytes = (nfds + 7) / 8;
+    if (setBytes > 128) setBytes = 128;
+    U8 rset[128] = {0}, wset[128] = {0}, eset[128] = {0};
+    if (rfdsAddr) cpu->memory->memcpyFromGuest(rset, rfdsAddr, setBytes);
+    if (wfdsAddr) cpu->memory->memcpyFromGuest(wset, wfdsAddr, setBytes);
+    if (efdsAddr) cpu->memory->memcpyFromGuest(eset, efdsAddr, setBytes);
+
+    auto isSet = [](const U8* s, U32 fd) { return (s[fd >> 3] >> (fd & 7)) & 1; };
+
+    struct PFD { S32 fd; U16 ev; U16 rev; };
+    PFD pfds[1024];
+    U32 npoll = 0;
+    for (U32 fd = 0; fd < nfds && npoll < 1024; fd++) {
+        U16 ev = 0;
+        if (rfdsAddr && isSet(rset, fd)) ev |= 0x0001; // POLLIN
+        if (wfdsAddr && isSet(wset, fd)) ev |= 0x0004; // POLLOUT
+        if (efdsAddr && isSet(eset, fd)) ev |= 0x0002; // POLLPRI
+        if (ev) { pfds[npoll].fd = (S32)fd; pfds[npoll].ev = ev; pfds[npoll].rev = 0; npoll++; }
+    }
+
+    U32 scratch = bounceSockaddrTo32(cpu, 0, 0, nullptr);
+    if (!scratch) return -K_EFAULT;
+    S32 rc;
+    if (npoll == 0) {
+        rc = (S32)kpoll(cpu->thread, scratch, 0, timeoutMs);
+    } else {
+        U8 tmp[K_PAGE_SIZE] = {0};
+        for (U32 i = 0; i < npoll; i++) {
+            U8* e = tmp + i * 8;
+            *(U32*)e = (U32)pfds[i].fd;
+            *(U16*)(e + 4) = pfds[i].ev;
+            *(U16*)(e + 6) = 0;
+        }
+        cpu->thread->memory->memcpy(scratch, tmp, npoll * 8);
+        rc = (S32)kpoll(cpu->thread, scratch, npoll, timeoutMs);
+        cpu->thread->memory->memcpy(tmp, scratch, npoll * 8);
+        for (U32 i = 0; i < npoll; i++) pfds[i].rev = *(U16*)(tmp + i * 8 + 6);
+    }
+    if (rc < 0) return (S64)rc;
+
+    U8 outR[128] = {0}, outW[128] = {0}, outE[128] = {0};
+    U32 readyCount = 0;
+    for (U32 i = 0; i < npoll; i++) {
+        U32 fd = (U32)pfds[i].fd; U16 rev = pfds[i].rev;
+        if (rfdsAddr && (rev & (0x0001 | 0x0010 /*POLLHUP*/ ))) { outR[fd>>3] |= (1<<(fd&7)); readyCount++; }
+        if (wfdsAddr && (rev & 0x0004)) { outW[fd>>3] |= (1<<(fd&7)); readyCount++; }
+        if (efdsAddr && (rev & (0x0002 | 0x0008 /*POLLERR*/))) { outE[fd>>3] |= (1<<(fd&7)); readyCount++; }
+    }
+    if (rfdsAddr) cpu->memory->memcpyToGuest(rfdsAddr, outR, setBytes);
+    if (wfdsAddr) cpu->memory->memcpyToGuest(wfdsAddr, outW, setBytes);
+    if (efdsAddr) cpu->memory->memcpyToGuest(efdsAddr, outE, setBytes);
+    return (S64)readyCount;
+}
+
 static U32 msgScratch(KThread* thread) {
     if (!thread || !thread->memory || !thread->process) return 0;
     BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(g_scratchMutex);
@@ -2547,10 +2621,22 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // callnum per send pins down exactly which RPC stalls. Cheap, env-gated.
     if (getenv("BW64_RPCSEND") && total >= 16 && cpu->thread) {
         U32 callnum = m32->readd(dataAddr + 0);
-        klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u",
-                 (int)(cpu->thread->process ? cpu->thread->process->id : -1),
-                 (int)cpu->thread->id, (unsigned long long)fd,
-                 (unsigned)callnum, (unsigned)total);
+        // BW64_RPCARG: also dump the first arg word (body+16) — for #31
+        // pthread_canceled this is `action` (0=test,1=enable,2=disable); for
+        // other calls it is whatever the RPC's first param is. Pins down WHICH
+        // libpthread path drives the TID29 #31 spin (S14).
+        if (getenv("BW64_RPCARG") && total >= 20) {
+            U32 a0 = m32->readd(dataAddr + 16);
+            klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u arg0=%d",
+                     (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                     (int)cpu->thread->id, (unsigned long long)fd,
+                     (unsigned)callnum, (unsigned)total, (int)a0);
+        } else {
+            klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u",
+                     (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                     (int)cpu->thread->id, (unsigned long long)fd,
+                     (unsigned)callnum, (unsigned)total);
+        }
     }
 
     // Build the 32-bit msghdr: a single iovec covering the gathered blob.
@@ -4417,18 +4503,11 @@ void ksyscall64(CPU64* cpu) {
         case X64_SYS_pselect6: {
             // pselect6(nfds, readfds*, writefds*, exceptfds*, timespec*, sigmask).
             // We have no native select, but kpoll() is the real readiness/blocking
-            // engine. Translate the fd_set bitmaps into a pollfd array, run kpoll,
-            // then translate the revents back into the fd_sets. Without this, wine
-            // (winex11/msg-loop) spins on pselect6=ENOSYS and never reaches GL.
-            if (!cpu->thread || !cpu->thread->process || !cpu->thread->memory) {
-                ret = (U64)-K_ENOSYS; break;
-            }
-            U32 nfds = (U32)a1;          // highest fd + 1
-            U64 rfdsAddr = a2, wfdsAddr = a3, efdsAddr = a4, tsAddr = a5;
-            if (nfds > 1024) { ret = (U64)-K_EINVAL; break; }
-
+            // engine — see doSelect64. Without this, wine (winex11/msg-loop) spins
+            // on pselect6=ENOSYS and never reaches GL.
+            U64 tsAddr = a5;
             // Timeout: a5 is a timespec* (NULL == infinite). Match kpoll's
-            // convention (0 == non-blocking, >0xF0000000 == infinite).
+            // convention (0 == non-blocking, 0xFFFFFFFF == infinite).
             U32 timeoutMs;
             if (tsAddr == 0) {
                 timeoutMs = 0xFFFFFFFFu;
@@ -4437,67 +4516,7 @@ void ksyscall64(CPU64* cpu) {
                 U64 nsec = cpu->memory->readq(tsAddr + 8);
                 timeoutMs = (U32)(sec * 1000 + nsec / 1000000);
             }
-
-            // Read the three fd_set bitmaps (each (nfds+7)/8 bytes, capped to the
-            // 128-byte/1024-fd standard). 0 addr == that set not requested.
-            U32 setBytes = (nfds + 7) / 8;
-            if (setBytes > 128) setBytes = 128;
-            U8 rset[128] = {0}, wset[128] = {0}, eset[128] = {0};
-            if (rfdsAddr) cpu->memory->memcpyFromGuest(rset, rfdsAddr, setBytes);
-            if (wfdsAddr) cpu->memory->memcpyFromGuest(wset, wfdsAddr, setBytes);
-            if (efdsAddr) cpu->memory->memcpyFromGuest(eset, efdsAddr, setBytes);
-
-            auto isSet = [](const U8* s, U32 fd) { return (s[fd >> 3] >> (fd & 7)) & 1; };
-
-            // Build a pollfd array (8 bytes each: {int fd; short events; short revents})
-            // — one entry per fd that appears in any set. POLLIN=1, POLLOUT=4,
-            // POLLPRI=2 (the select events) per Linux poll.h.
-            struct PFD { S32 fd; U16 ev; U16 rev; };
-            PFD pfds[1024];
-            U32 npoll = 0;
-            for (U32 fd = 0; fd < nfds && npoll < 1024; fd++) {
-                U16 ev = 0;
-                if (rfdsAddr && isSet(rset, fd)) ev |= 0x0001; // POLLIN
-                if (wfdsAddr && isSet(wset, fd)) ev |= 0x0004; // POLLOUT
-                if (efdsAddr && isSet(eset, fd)) ev |= 0x0002; // POLLPRI
-                if (ev) { pfds[npoll].fd = (S32)fd; pfds[npoll].ev = ev; pfds[npoll].rev = 0; npoll++; }
-            }
-
-            // Run kpoll via the 32-bit scratch (same path the poll/ppoll case uses).
-            S32 rc;
-            U32 scratch = bounceSockaddrTo32(cpu, 0, 0, nullptr);
-            if (!scratch) { ret = (U64)-K_EFAULT; break; }
-            if (npoll == 0) {
-                rc = (S32)kpoll(cpu->thread, scratch, 0, timeoutMs);
-            } else {
-                U8 tmp[K_PAGE_SIZE] = {0};
-                for (U32 i = 0; i < npoll; i++) {
-                    U8* e = tmp + i * 8;
-                    *(U32*)e = (U32)pfds[i].fd;
-                    *(U16*)(e + 4) = pfds[i].ev;
-                    *(U16*)(e + 6) = 0;
-                }
-                cpu->thread->memory->memcpy(scratch, tmp, npoll * 8);
-                rc = (S32)kpoll(cpu->thread, scratch, npoll, timeoutMs);
-                cpu->thread->memory->memcpy(tmp, scratch, npoll * 8);
-                for (U32 i = 0; i < npoll; i++) pfds[i].rev = *(U16*)(tmp + i * 8 + 6);
-            }
-            if (rc < 0) { ret = (U64)(S64)rc; break; }
-
-            // Translate revents back into freshly-zeroed fd_sets and count ready fds
-            // (select returns the total number of ready bits across all sets).
-            U8 outR[128] = {0}, outW[128] = {0}, outE[128] = {0};
-            U32 readyCount = 0;
-            for (U32 i = 0; i < npoll; i++) {
-                U32 fd = (U32)pfds[i].fd; U16 rev = pfds[i].rev;
-                if (rfdsAddr && (rev & (0x0001 | 0x0010 /*POLLHUP*/ ))) { outR[fd>>3] |= (1<<(fd&7)); readyCount++; }
-                if (wfdsAddr && (rev & 0x0004)) { outW[fd>>3] |= (1<<(fd&7)); readyCount++; }
-                if (efdsAddr && (rev & (0x0002 | 0x0008 /*POLLERR*/))) { outE[fd>>3] |= (1<<(fd&7)); readyCount++; }
-            }
-            if (rfdsAddr) cpu->memory->memcpyToGuest(rfdsAddr, outR, setBytes);
-            if (wfdsAddr) cpu->memory->memcpyToGuest(wfdsAddr, outW, setBytes);
-            if (efdsAddr) cpu->memory->memcpyToGuest(efdsAddr, outE, setBytes);
-            ret = (U64)readyCount;
+            ret = (U64)doSelect64(cpu, (U32)a1, a2, a3, a4, timeoutMs);
             break;
         }
         case X64_SYS_sched_yield:
@@ -4826,11 +4845,26 @@ void ksyscall64(CPU64* cpu) {
             if (a2 == 0) { ret = (U64)-K_EFAULT; break; }
             ret = sys_readv64(cpu, a1, a2, a3);
             break;
-        case X64_SYS_select:
-            // select(nfds, readfds, writefds, exceptfds, timeout). Without
-            // real fd polling we cannot honor it; ENOSYS surfaces cleanly.
-            ret = (U64)-K_ENOSYS;
+        case X64_SYS_select: {
+            // select(nfds, readfds*, writefds*, exceptfds*, timeval*). Same engine
+            // as pselect6 (doSelect64 / kpoll); the only difference is the timeout
+            // struct is a `struct timeval {long sec; long usec}` (a5, NULL ==
+            // infinite). launchd's kqueue_demand_loop blocks here on
+            // select(mainkq+1, &rfds, NULL, NULL, NULL) — the ENOSYS stub made it
+            // busy-spin (and fire dserver #31 pthread_canceled every turn); now it
+            // truly blocks until the kqueue/bootstrap fd is readable.
+            U64 tvAddr = a5;
+            U32 timeoutMs;
+            if (tvAddr == 0) {
+                timeoutMs = 0xFFFFFFFFu;
+            } else {
+                U64 sec  = cpu->memory->readq(tvAddr);
+                U64 usec = cpu->memory->readq(tvAddr + 8);
+                timeoutMs = (U32)(sec * 1000 + usec / 1000);
+            }
+            ret = (U64)doSelect64(cpu, (U32)a1, a2, a3, a4, timeoutMs);
             break;
+        }
         case X64_SYS_chmod:
         case X64_SYS_fchmod:
         case X64_SYS_fchmodat:

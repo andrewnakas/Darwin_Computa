@@ -62,21 +62,86 @@ U32 KEPoll::setLock(KFileLock* lock, bool wait) {
 }
 
 bool KEPoll::isOpen() {
-    kdebug("KEPoll::isOpen not implemented yet");
-    return false;
+    // An epoll fd is always "open" (it has no peer to hang up on). Reporting it
+    // open lets it participate in another poll/select set (poll-on-epoll) without
+    // being treated as a hung-up fd.
+    return true;
 }
 
+// Poll-on-epoll. Darwin's libkqueue implements kqueue() as a Linux epoll fd and
+// then BLOCKS waiting for kevents via select()/poll() on that epoll fd — e.g.
+// launchd's kqueue_demand_loop does select(mainkq+1, &rfds, ...) where mainkq is
+// the epoll fd. So an epoll fd must answer isReadReady()/waitForEvents() by
+// delegating to the fds it is monitoring: it is "readable" (a kevent is pending)
+// exactly when one of its armed registrations currently has a requested event
+// ready on the underlying object, and a waiter on the epoll fd must be woken
+// whenever any of those underlying objects becomes ready.
+
 void KEPoll::waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events) {
-    kpanic("KEPoll::waitForEvents not implemented yet");
+    KThread* thread = KThread::currentThread();
+    if (!thread || !thread->process) {
+        return;
+    }
+    // events==0 is the unregister pass: detach parentCondition from every
+    // underlying fd's condition (mirror of how internal_poll tears down its
+    // parent links). We can't selectively remove per-fd here without tracking
+    // which we added, so we attempt removal on each armed registration's object
+    // (REMOVE_PARENT is a no-op when the link isn't present).
+    for (const auto& n : this->data) {
+        Data* reg = n.value;
+        if (!reg->armed) {
+            continue;
+        }
+        KFileDescriptor* pFD = thread->process->getFileDescriptor_nolock(reg->fd);
+        if (!pFD || !pFD->kobject) {
+            continue;
+        }
+        // Ask the underlying object to (un)register the parent condition for the
+        // events this registration cares about. The epoll fd is readable when any
+        // monitored event fires, so wake the poll-on-epoll waiter on POLLIN-side
+        // readiness of the registration's requested events.
+        pFD->kobject->waitForEvents(parentCondition, events ? reg->events : 0);
+    }
 }
 
 bool KEPoll::isReadReady() {
-    kpanic("KEPoll::isReadReady not implemented yet");
+    // Readable == at least one kevent is pending == some armed registration has a
+    // requested event ready on its underlying object right now.
+    KThread* thread = KThread::currentThread();
+    if (!thread || !thread->process) {
+        return false;
+    }
+    for (const auto& n : this->data) {
+        Data* reg = n.value;
+        if (!reg->armed) {
+            continue;
+        }
+        KFileDescriptor* pFD = thread->process->getFileDescriptor_nolock(reg->fd);
+        if (!pFD || !pFD->kobject) {
+            continue;
+        }
+        KObject* k = pFD->kobject.get();
+        if ((reg->events & K_POLLIN) && k->isReadReady()) {
+            return true;
+        }
+        if ((reg->events & K_POLLOUT) && k->isWriteReady()) {
+            return true;
+        }
+        if ((reg->events & K_POLLPRI) && k->isPriorityReadReady()) {
+            return true;
+        }
+        // A hung-up monitored fd is also an epoll event (EPOLLHUP/EPOLLERR are
+        // implicit) — surface it as readable so the poll-on-epoll waiter wakes
+        // and the application drains it via epoll_wait/kevent.
+        if (!k->isOpen()) {
+            return true;
+        }
+    }
     return false;
 }
 
 bool KEPoll::isWriteReady() {
-    kpanic("KEPoll::isWriteReady not implemented yet");
+    // You cannot write to an epoll fd; it is never selectable for write.
     return false;
 }
 
