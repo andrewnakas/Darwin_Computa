@@ -300,6 +300,20 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
         a.envValues.push_back(BString::copy("DYLD_PRINT_APIS=1"));
         a.envValues.push_back(BString::copy("DYLD_PRINT_SEGMENTS=1"));
     }
+    // DSERVER_INIT: darlingserver's spawnLaunchd() reads this to choose which
+    // guest Mach-O it execs as the container's init process (it defaults to
+    // /sbin/launchd — darlingserver.cpp:263). Forwarding it lets the harness run
+    // a plain CLI app (e.g. DSERVER_INIT=/usr/bin/uname) DIRECTLY through the
+    // mldr->dyld->checkin->darlingserver pipeline, bypassing launchd's
+    // (currently incomplete) service bootstrap — the shortest path to seeing a
+    // real Darwin "hello world" run under the emulator. The init process gets
+    // PID 1 in its namespace; a tool that doesn't depend on launchd services
+    // (uname, sw_vers, echo, a static hello) runs and exits normally.
+    if (const char* dsInit = std::getenv("DSERVER_INIT")) {
+        if (dsInit[0]) {
+            a.envValues.push_back(BString::copy((std::string("DSERVER_INIT=") + dsInit).c_str()));
+        }
+    }
 
     BString first = guestArgs[0];
     if (first.endsWith("darlingserver")) {
