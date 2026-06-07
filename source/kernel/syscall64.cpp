@@ -2539,6 +2539,20 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         total += (U32)l;
     }
 
+    // BW64_RPCSEND: log the darlingserver RPC call number this thread is sending.
+    // The dserver_rpc_callhdr_t is the first 16 bytes of the message body
+    // { u32 number; s32 pid; s32 tid; u32 arch; }. A launchd RPC that the server
+    // never logs receiving = the request didn't reach the server's loop (lost
+    // wakeup); the matching recvmsg then blocks forever. Logging the OUTGOING
+    // callnum per send pins down exactly which RPC stalls. Cheap, env-gated.
+    if (getenv("BW64_RPCSEND") && total >= 16 && cpu->thread) {
+        U32 callnum = m32->readd(dataAddr + 0);
+        klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u",
+                 (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                 (int)cpu->thread->id, (unsigned long long)fd,
+                 (unsigned)callnum, (unsigned)total);
+    }
+
     // Build the 32-bit msghdr: a single iovec covering the gathered blob.
     m32->writed(base + MSG_SCRATCH_IOV + 0, dataAddr);
     m32->writed(base + MSG_SCRATCH_IOV + 4, total);
@@ -2640,6 +2654,28 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         }
         ~WsConcGuard() { if (on) --g_wsConcInflight; }
     } wsConcGuard(wsConcRm, cpu);
+
+    // BW64_RPCSEND: bracket recvmsg on a darlingserver RPC socket so a reply that
+    // never arrives is visible — log ENTER before the (blocking) recv and RETURN
+    // after. If the final ENTER has no matching RETURN while the peer (server)
+    // logged sending the reply, the wakeup/reply was lost on the transport. Gated
+    // on the same env as the send-side log; the fd heuristic (>=0x2000) matches
+    // launchd's dserver sockets (0x27ff/0x27fe) without touching normal fds.
+    struct RpcRecvGuard {
+        bool on; CPU64* cpu; U64 fd;
+        RpcRecvGuard(CPU64* c, U64 f) : cpu(c), fd(f) {
+            on = getenv("BW64_RPCSEND") && f >= 0x2000 && c->thread;
+            if (on) klog_fmt("RPCRECV pid=%d tid=%d fd=0x%llx ENTER",
+                             (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                             (int)cpu->thread->id, (unsigned long long)fd);
+        }
+        ~RpcRecvGuard() {
+            if (on) klog_fmt("RPCRECV pid=%d tid=%d fd=0x%llx RETURN",
+                             (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                             (int)cpu->thread->id, (unsigned long long)fd);
+        }
+    } rpcRecvGuard(cpu, fd);
+
     U32 base = msgScratch(thread);
     if (!base) return (U64)-K_EFAULT;
     KMemory* m32 = thread->memory;
