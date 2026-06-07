@@ -62,15 +62,42 @@ vestigial for the current Darling release.
 
 ## Status
 
-Pre-alpha. The emulated-Linux substrate is mature (it boots 64-bit Wine to a rendered GUI); the Darwin layer is under active bring-up. Current milestones:
+Pre-alpha — but **real macOS command-line binaries now run end-to-end and print correct output** under the emulator. The emulated-Linux substrate is mature (it boots 64-bit Wine to a rendered GUI); the Darwin layer reaches a working `mldr → dyld → libSystem → darlingserver` app pipeline.
+
+### ✅ Working today
+
+Real Darling/macOS Mach-O CLIs execute through the full pipeline and exit cleanly (`exit_group` status 0):
+
+| Binary | Output under Darwin_Computa |
+| --- | --- |
+| `/usr/bin/sw_vers` | `ProductName: macOS` · `ProductVersion: 11.7.4` · `BuildVersion: Darling` |
+| `/usr/bin/uname` | `Darwin` |
+| `/usr/bin/arch` | `i386` |
+| `/usr/bin/hostname` | `boxedwine64` |
+| `/bin/date` | `Sun Jun  7 00:10:05 UTC 2026` |
+
+One command runs and shows the output like a terminal (the `--window` flag opens it in a macOS Terminal.app window):
+
+```sh
+tools/run_darling_app.sh /usr/bin/sw_vers            # prints to this terminal
+tools/run_darling_app.sh /usr/bin/sw_vers --window   # opens a Terminal.app window
+```
+
+This works by having `darlingserver` exec the target binary as its container **init** process (via the `DSERVER_INIT` env var the harness forwards), so a self-contained CLI runs without needing `launchd`'s service bootstrap. First run is ~60–90 s (prefix walk + `dyld`).
+
+### Milestones
 
 - **Boot harness** — `--darwin-run <mach-o>` stages the Darling rootfs and runs `mldr` → `dyld` through the standard emulator path.
 - **Additive build gate** — all Darwin work is behind `BOXEDWINE_DARWIN`; the Wine path is unchanged and `--x64-selftest` passes **234/234**. `--darwin-selftest` passes **12/12**.
 - **Real Darling runs under emulation** — the Docker rootfs build stages the actual Darling release (`v0.1.20260222`); `mldr` runs through glibc/`ld.so` init, the `ptrace` startup probe, and opens/mmaps the target Mach-O.
-- **`darlingserver` boots to the `launchd` exec** — Darling's userspace kernel runs its full startup on the emulated kernel: prefix setup, Unix-socket bind, epoll loop, container-init fork, and the exec of `launchd` via `mldr vchroot`. Reaching this required implementing the syscalls the trace surfaced — `eventfd`/`timerfd` (mapped onto the emulator's existing event/timer objects), the `chown`/`chmod` families, root credentials (`setuid`/`setres*`), `/etc/passwd`, `/proc/sys/fs/nr_open`, and no-op `unshare`/`mount` (the guest VFS is already private, so no real namespaces/overlay are needed).
-- **Prefix-init walk eliminated** — darlingserver previously mirrored the entire ~375 MB prefix onto itself on every launch (`copyAndSetAttributes`, ~400k `stat`/`utimensat`/`fchownat`/`fchmodat` syscalls, minutes per boot). Selecting darlingserver's overlayfs path (a single no-op `mount`) instead of the non-overlay copy path removes the walk entirely; startup now reaches the `launchd` exec in seconds.
+- **`darlingserver` boots and forks the container init** — Darling's userspace kernel runs its full startup on the emulated kernel: prefix setup, Unix-socket bind, epoll loop, PID-namespace container fork, and `mldr vchroot`. Reaching this required implementing the syscalls the trace surfaced — `eventfd`/`timerfd`, the `chown`/`chmod` families, root credentials, `/etc/passwd`, `/proc/sys/fs/nr_open`, PID-namespace modeling for `CLONE_NEWPID`, and no-op `unshare`/`mount`.
+- **`mldr ↔ darlingserver` checkin works** — full `dserver_rpc_*` checkin over AF_UNIX with `SCM_RIGHTS` fd-passing, `process_vm_readv/writev`, `pidfd_open`, `/proc/<pid>/maps`, kqueue Mach-port channels, and the commpage. A Mach-O reaches and runs `main`, does real Mach IPC, and returns output.
+- **`launchd` boots to a clean idle** — as PID 1 it runs `launchd_runtime_init` → banner → `jobmgr_init` → `launchd_runtime`, then parks both threads in `mach_msg`. (A run that looked like a deadlock was a tracing artifact; untraced it idles cleanly.)
 
-**Next:** carry `launchd` through `mldr`+`vchroot` inside the prefix (current blocker: the `vchroot` helper path), then the `mldr ↔ darlingserver` `dserver_rpc_*` checkin over AF_UNIX, then `/proc/<pid>/maps` and ptrace-backed Mach-exception delivery — at which point a Mach-O reaches `main`. The longer roadmap targets a headless CLI, then `bash`/`ls`, then a Cocoa window, then WebAssembly.
+**Next:**
+- **Args to apps** (`echo hi`, `bash -c …`) — `DSERVER_INIT` passes only a path; needs an argv extension to the init exec, or the `launchd`/`launchctl` route.
+- **Multiple apps / an interactive shell / windowed GUI apps** — requires fixing the `launchd` service bootstrap: `jobmgr_init` runs but `job_dispatch` never `fork`+`exec`s the System bootstrapper (`/bin/launchctl bootstrap -S System`) — no `socketpair`/`fork` is issued — so `launchctl`/`shellspawn`/`darling shell` never start. This is the current frontier.
+- The longer roadmap then targets a Cocoa window and WebAssembly.
 
 See [`docs/PLAN_DARWIN.md`](docs/PLAN_DARWIN.md) for the phased roadmap and [`docs/BOXEDWINE64.md`](docs/BOXEDWINE64.md) for the emulated-Linux substrate.
 
@@ -88,7 +115,12 @@ BW=build_darwin/Build/Products/Debug/Boxedwine.app/Contents/MacOS/Boxedwine
 
 "$BW" --x64-selftest                  # inherited substrate; expects 234/234
 "$BW" --darwin-selftest               # Darwin /dev/mach trap layer; expects 12/12
-"$BW" --darwin-run /usr/bin/hello     # boot a Mach-O under emulated Darling
+
+# Run a real macOS CLI binary under emulated Darling and show its output:
+tools/run_darling_app.sh /usr/bin/sw_vers            # prints to this terminal
+tools/run_darling_app.sh /usr/bin/sw_vers --window   # opens a Terminal.app window
+tools/run_darling_app.sh /usr/bin/uname              # other working examples:
+tools/run_darling_app.sh /usr/bin/arch               #   arch, hostname, date, ...
 ```
 
 The `Boxedwine` / Debug scheme defines `BOXEDWINE_GUEST_X64=1` and `BOXEDWINE_DARWIN=1`. Sources live in an Xcode synchronized folder group, so new files under `source/` compile automatically without project edits.
@@ -103,7 +135,7 @@ The Darling rootfs (Darling's amd64 userland, staged into a zip the same way Box
 | `BW64_DEVMACHTRACE=1` | Trace Mach traps through the `/dev/mach` device |
 | `BW64_DIRTRACE=1` | Trace directory reads (`getdents64`) |
 
-Driver script for the darlingserver bring-up: [`tools/run_darling_cli.sh`](tools/run_darling_cli.sh).
+Driver scripts: [`tools/run_darling_app.sh`](tools/run_darling_app.sh) (run a macOS CLI app and show its output, `--window` for a Terminal.app window) and [`tools/run_darling_cli.sh`](tools/run_darling_cli.sh) (lower-level darlingserver bring-up driver).
 
 ---
 
