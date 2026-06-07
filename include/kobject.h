@@ -49,6 +49,14 @@ public:
     virtual bool isOpen()=0;
     virtual bool isReadReady()=0;
     virtual bool isPriorityReadReady() { return isReadReady(); }
+    // Monotonic counter that bumps on every fresh read-readiness event (e.g. each
+    // datagram enqueued, each chunk written to a stream's recv buffer), modelling
+    // Linux's per-skb sk_data_ready callback. Used ONLY by epoll EPOLLET: an
+    // edge-triggered POLLIN must re-fire on EVERY new arrival, not just on a
+    // 0->non-empty level transition, otherwise a fd whose queue never fully drains
+    // between arrivals stops being reported (the darlingserver multi-client wall).
+    // Default 0 = "not tracked": such fds fall back to pure level-edge semantics.
+    virtual U64 readReadySeq() { return 0; }
     virtual bool isWriteReady()=0;
     virtual void waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events)=0;
     virtual U32 write(KThread* thread, U32 buffer, U32 len);

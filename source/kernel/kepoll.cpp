@@ -214,6 +214,9 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
         // points straight at the registration's mask). next lives in this->data
         // for the whole call, so the pointer stays valid across the poll/block.
         pollData.suppressWriteback = edge ? &next->lastReported : nullptr;
+        // Seed the per-arrival edge baseline so internal_poll can tell whether a
+        // new datagram/chunk arrived since our last POLLIN delivery (ET only).
+        pollData.lastReadSeq = edge ? next->lastReadSeq : 0;
         thread->pollData.push_back(pollData);
         owners.push_back(next);
         pollCount++;
@@ -230,10 +233,27 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
             // already delivered); for level-triggered fds report the full revents.
             U32 toReport = edge ? (data.revents & ~owner->lastReported) : data.revents;
 
+            // ET POLLIN also re-fires when a NEW arrival bumped the fd's readReadySeq
+            // past the value we last delivered POLLIN at, even if POLLIN never fell to
+            // 0 (a datagram queue that never fully drains between arrivals). Without
+            // this, the level-edge mask latches POLLIN after the first delivery and
+            // never reports the fd again -> piled-up datagrams go unserviced (the
+            // darlingserver shared dserver socket, multiple guest threads).
+            if (edge && (data.revents & K_POLLIN) && data.hasReadSeq &&
+                data.readSeq != owner->lastReadSeq) {
+                toReport |= K_POLLIN;
+            }
+
             // Track delivered bits for ET so a falling-then-rising edge re-fires;
-            // bits no longer asserted are dropped from lastReported.
+            // bits no longer asserted are dropped from lastReported. Advance the
+            // per-arrival baseline only when we actually deliver POLLIN, so a fresh
+            // arrival that we could not deliver this cycle (e.g. maxevents starvation)
+            // is still reported next time.
             if (edge) {
                 owner->lastReported = data.revents;
+                if ((toReport & K_POLLIN) && data.hasReadSeq) {
+                    owner->lastReadSeq = data.readSeq;
+                }
             }
 
             if (toReport != 0) {

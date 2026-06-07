@@ -282,6 +282,7 @@ U32 KUnixSocketObject::internal_write(KThread* thread, const std::shared_ptr<KUn
         con->recvBuffer.put(ram, len);
         return true;
         });
+    con->readSeq++; // fresh data arrived -> ET POLLIN edge for the peer
     return len;
 }
 
@@ -395,6 +396,7 @@ U32 KUnixSocketObject::writeNative(U8* buffer, U32 len) {
     {
         BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(con->lockCond);
         con->recvBuffer.put(buffer, len);
+        con->readSeq++; // ET POLLIN edge for the peer
         BOXEDWINE_CONDITION_SIGNAL_ALL(con->lockCond);
     }
     con->onPeerWrote();
@@ -422,6 +424,7 @@ U32 KUnixSocketObject::unixsocket_write_native_nowait(const std::shared_ptr<KObj
         BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(con->lockCond);
         //printf("SOCKET write len=%d bufferSize=%d pos=%d\n", len, s->connection->recvBufferLen, s->connection->recvBufferWritePos);
         con->recvBuffer.put(value, len);
+        con->readSeq++; // ET POLLIN edge for the peer
         BOXEDWINE_CONDITION_SIGNAL_ALL(con->lockCond);
     }
     con->onPeerWrote();
@@ -1035,6 +1038,7 @@ U32 KUnixSocketObject::dgramSend(KThread* thread, U32 destAddr, U32 destLen, std
     {
         BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(dest->lockCond);
         dest->msgs.push(msg);
+        dest->readSeq++; // each datagram is a fresh ET POLLIN edge
         BOXEDWINE_CONDITION_SIGNAL_ALL(dest->lockCond);
     }
     return payload;
@@ -1161,6 +1165,7 @@ U32 KUnixSocketObject::sendmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
                 result++;
             }
         }
+        con->readSeq++; // ET POLLIN edge for the XWire peer
         BOXEDWINE_CONDITION_SIGNAL_ALL(con->lockCond);
         if (getenv("BW64_XWIRE")) {
             klog_fmt("KUnixSocket::sendmsg datalen=%d to XWire peer via recvBuffer", (int)result);
@@ -1192,6 +1197,7 @@ U32 KUnixSocketObject::sendmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
         }
     }
     con->msgs.push(msg);
+    con->readSeq++; // each datagram is a fresh ET POLLIN edge (the dserver RPC path)
     BOXEDWINE_CONDITION_SIGNAL_ALL(con->lockCond);
 
     if (getenv("BW64_XWIRE")) {

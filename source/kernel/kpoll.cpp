@@ -79,6 +79,14 @@ S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout) {
                     }
                     if ((data->events & K_POLLIN) != 0 && fd->kobject->isReadReady()) {
                         data->revents |= K_POLLIN;
+                        // Capture the per-arrival readiness counter so KEPoll::wait
+                        // can re-fire ET POLLIN when a new datagram/chunk arrived
+                        // since the last delivery even if the queue never emptied.
+                        U64 seq = fd->kobject->readReadySeq();
+                        if (seq) {
+                            data->readSeq = seq;
+                            data->hasReadSeq = true;
+                        }
                     }
                     if ((data->events & K_POLLOUT) != 0 && fd->kobject->isWriteReady()) {
                         data->revents |= K_POLLOUT;
@@ -118,7 +126,17 @@ S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout) {
                     // full revents are still reported to the caller; only whether
                     // we consider this fd "freshly ready" is affected. suppress is
                     // 0 for poll()/select(), so their semantics are unchanged.
-                    if ((data->revents & ~data->suppress) != 0) {
+                    U32 fresh = data->revents & ~data->suppress;
+                    // ...but a POLLIN that the level-edge mask would suppress is still
+                    // a fresh edge if a NEW arrival bumped readSeq past the value we
+                    // last delivered POLLIN at. This is what keeps a never-emptied
+                    // datagram queue generating edges (the multi-client dserver wall).
+                    if (data->suppressWriteback && data->hasReadSeq &&
+                        (data->revents & K_POLLIN) && (data->suppress & K_POLLIN) &&
+                        data->readSeq != data->lastReadSeq) {
+                        fresh |= K_POLLIN;
+                    }
+                    if (fresh != 0) {
                         result++;
                     }
                 }

@@ -42,6 +42,7 @@ public:
     bool supportsLocks() override;
     bool isOpen() override;
     bool isReadReady() override;
+    U64 readReadySeq() override { return this->readSeq; }
     bool isWriteReady() override;
     void waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events) override;
     U32 write(KThread* thread, U32 buffer, U32 len) override;
@@ -124,6 +125,12 @@ protected:
     Soft_Ring_Buffer recvBuffer;
     std::queue<std::shared_ptr<KSocketMsg> > msgs;
     U32 pid = 0;
+    // Bumped on every fresh delivery into recvBuffer or msgs (the analogue of
+    // Linux's per-skb sk_data_ready). epoll EPOLLET POLLIN re-fires whenever this
+    // advances while the socket is still readable, so a datagram listener whose
+    // queue never drains to empty between arrivals (the darlingserver shared dserver
+    // socket, fd=3) keeps generating edges instead of latching after the first.
+    U64 readSeq = 0;
 
     U32 internal_write(KThread* thread, const std::shared_ptr<KUnixSocketObject>& con, BOXEDWINE_CONDITION& cond, U32 buffer, U32 len);
     U32 writePipeClosed(KThread* thread, bool noSignal);

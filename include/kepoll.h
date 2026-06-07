@@ -62,6 +62,13 @@ private:
         // lastReported). EPOLLONESHOT disarms the registration (armed=false) after
         // any delivery until EPOLL_CTL_MOD re-arms it.
         U32 lastReported = 0;
+        // The readReadySeq() value at which we last delivered an ET POLLIN. When the
+        // fd's seq advances past this while POLLIN is still asserted, a new datagram
+        // (or stream chunk) arrived since our last delivery -> a fresh ET edge, even
+        // though the POLLIN level never dropped to 0. Pure level-edge tracking
+        // (lastReported) misses this when the queue never fully drains between
+        // arrivals — the darlingserver shared-dgram-socket multi-client wall.
+        U64 lastReadSeq = 0;
         bool armed = true;
     };
     BHashTable<U32, Data*> data;

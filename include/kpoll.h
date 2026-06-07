@@ -43,6 +43,17 @@ public:
     // POLLIN forever -> the parked epoll_wait never woke (the darlingserver wall).
     // nullptr for poll()/select(), so their level-triggered semantics are intact.
     U32* suppressWriteback = nullptr;
+    // EPOLLET POLLIN re-arming by arrival count (KEPoll only). When the polled fd
+    // exposes a readReadySeq() (unix sockets bump it per datagram/chunk), internal_poll
+    // records the current value here. KEPoll::wait compares it against the seq it last
+    // delivered POLLIN at (Data::lastReadSeq): if it advanced while POLLIN is still
+    // asserted, that is a fresh edge even though the level never fell to 0 — the case
+    // a pure level-edge mask misses when a queue never fully drains between arrivals.
+    U64 readSeq = 0;
+    bool hasReadSeq = false;
+    // For ET fds, the seq we last delivered POLLIN at (copied from Data::lastReadSeq).
+    // POLLIN counts as freshly ready when readSeq != lastReadSeq.
+    U64 lastReadSeq = 0;
 };
 
 S32 internal_poll(KThread* thread, KPollData* data, U32 count, U32 timeout);
