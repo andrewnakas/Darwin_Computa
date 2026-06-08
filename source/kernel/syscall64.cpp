@@ -2455,6 +2455,10 @@ static U32 bounceSockaddrTo32(CPU64* cpu, U64 src64, U32 len, U32* outLenAddr) {
 // Per-THREAD (see bounceSockaddrTo32's note): a per-process msg scratch is
 // corrupted when sibling threads sendmsg/recvmsg concurrently.
 static std::unordered_map<U32, U32> g_msgScratchByThread;
+// BW64_S2C: armed by the first S2C RECV — once set, the syscall dispatcher logs
+// every syscall this tid makes, so the post-S2C handler path (munmap+push_reply)
+// is fully visible right up to the crash. 0 = disarmed.
+int g_s2cTraceTid = 0;
 // execve replaces the process address space, so any cached msg-scratch mmap for
 // a thread of that process is now a dangling guest address. mldr re-execs ITSELF
 // in-place (same pid/tid) when it loads the next Darwin image (e.g. vchroot ->
@@ -2597,6 +2601,31 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         namelen32 = namelen;
     }
 
+    // BW64_SMSG: dump the raw 64-bit msghdr + each iov segment BEFORE the gather,
+    // so a send that faults mid-gather (an iov base pointing at unmapped guest
+    // memory) is still fully captured. The dserver mach_msg_overwrite (#38) body
+    // is built by libsystem_kernel's dserver_rpc_hooks_send_message; if any iov
+    // base is bogus our memcpyFromGuest faults and the guest sees a short send
+    // (the "BAD SEND LENGTH" assertion). Gated; the fd heuristic keeps it on the
+    // dserver RPC sockets.
+    bool smsg = getenv("BW64_SMSG") && fd >= 0x2000;
+    if (smsg) {
+        klog_fmt("SMSG pid=%d tid=%d fd=0x%llx HDR name=0x%llx namelen=%u iov=0x%llx iovlen=%llu control=0x%llx ctllen=%llu",
+                 (int)(thread->process ? thread->process->id : -1), (int)thread->id,
+                 (unsigned long long)fd, (unsigned long long)name, (unsigned)namelen,
+                 (unsigned long long)iov, (unsigned long long)iovlen,
+                 (unsigned long long)control, (unsigned long long)ctllen);
+        for (U64 i = 0; i < iovlen && i < 8; i++) {
+            U64 b = cpu->memory->readq(iov + 16 * i);
+            U64 l = cpu->memory->readq(iov + 16 * i + 8);
+            bool ok = b && cpu->memory->isPageMapped((U32)(b >> 12)) &&
+                      cpu->memory->isPageMapped((U32)((b + (l ? l - 1 : 0)) >> 12));
+            klog_fmt("SMSG   iov[%llu] base=0x%llx len=%llu mapped=%d",
+                     (unsigned long long)i, (unsigned long long)b,
+                     (unsigned long long)l, ok ? 1 : 0);
+        }
+    }
+
     // Gather all iov segments into the scratch data buffer.
     U32 dataAddr = base + MSG_SCRATCH_DATA;
     U32 total = 0;
@@ -2611,6 +2640,28 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         cpu->memory->memcpyFromGuest(tmp.data(), b, (U32)l);
         m32->memcpy(dataAddr + total, tmp.data(), (U32)l);
         total += (U32)l;
+    }
+
+    // BW64_S2C: dump the wire bytes of an S2C call (server->client memory upcall).
+    // call_number == 0x52cca11 (dserver_callnum_s2c). darlingserver, to deliver a
+    // Mach msg carrying OUT-OF-LINE memory, sends this on the RECEIVER's RPC
+    // socket so the receiver's libsystem_kernel performs the mmap/munmap/mprotect
+    // in its own address space. The body is s2c_callhdr{int call_number; int
+    // s2c_number} followed by the op args (e.g. s2c_call_munmap{addr;len}). This
+    // pins which s2c_number + args go over the wire and whether the send carried
+    // its fd. Gated; dserver-socket fd heuristic.
+    if (getenv("BW64_S2C") && total >= 8 && fd >= 0x2000) {
+        U32 cn = m32->readd(dataAddr + 0);
+        // 0x52cca11 = dserver_callnum_s2c (server->client send); 0xbadca11 =
+        // the client's push_reply that carries the op result back to the server.
+        if (cn == 0x52cca11u || cn == 0xbadca11u) {
+            char hex[72 * 3 + 1]; int n = total < 72 ? (int)total : 72; int o = 0;
+            for (int i = 0; i < n && o + 3 < (int)sizeof(hex); i++) o += snprintf(hex + o, sizeof(hex) - o, "%02x ", m32->readb(dataAddr + i));
+            klog_fmt("S2C SEND pid=%d tid=%d fd=0x%llx total=%u ctl=%llu %s bytes=[%s]",
+                     (int)(thread->process ? thread->process->id : -1), (int)thread->id,
+                     (unsigned long long)fd, (unsigned)total, (unsigned long long)ctllen,
+                     cn == 0xbadca11u ? "PUSH_REPLY" : "S2C_CALL", hex);
+        }
     }
 
     // BW64_RPCSEND: log the darlingserver RPC call number this thread is sending.
@@ -2642,12 +2693,20 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
             U32 sendSize = m32->readd(dataAddr + 28);
             U32 rcvName = m32->readd(dataAddr + 36);
             U32 bits = 0, remote = 0, local = 0, msgid = 0, sz = 0;
-            if (msgPtr && cpu->thread->memory && (option & 0x1 /*SEND*/)) {
-                bits   = cpu->thread->memory->readd(msgPtr + 0);
-                sz     = cpu->thread->memory->readd(msgPtr + 4);
-                remote = cpu->thread->memory->readd(msgPtr + 8);
-                local  = cpu->thread->memory->readd(msgPtr + 12);
-                msgid  = cpu->thread->memory->readd(msgPtr + 20);
+            // The `msg` pointer is a 64-bit guest address (e.g. 0x7fffff...) in
+            // the SENDER's address space, so it MUST be dereferenced through the
+            // 64-bit guest memory (cpu->memory == KMemory64), NOT thread->memory
+            // (the 32-bit KMemory). The original S15 instrument used the 32-bit
+            // memory, which FAULTED on the high 64-bit address — that fault was
+            // the "Page Fault at FFDFE930" that corrupted the in-flight send and
+            // produced the bogus "BAD SEND LENGTH: 46 (expected 56)" abort. It
+            // was a tracing artifact, not a real S2C/transport bug.
+            if (msgPtr && cpu->memory && (option & 0x1 /*SEND*/)) {
+                bits   = cpu->memory->readd(msgPtr + 0);
+                sz     = cpu->memory->readd(msgPtr + 4);
+                remote = cpu->memory->readd(msgPtr + 8);
+                local  = cpu->memory->readd(msgPtr + 12);
+                msgid  = cpu->memory->readd(msgPtr + 20);
             }
             klog_fmt("MACHMSG pid=%d tid=%d opt=0x%x(%s%s) sendsz=%u rcvname=0x%x | bits=0x%x size=%u remote=0x%x local=0x%x id=%d",
                      (int)(cpu->thread->process ? cpu->thread->process->id : -1),
@@ -2721,6 +2780,11 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     m32->writed(base + MSG_SCRATCH_HDR + 24, 0);                 // msg_flags
 
     U32 rc = ksendmsg(thread, (U32)fd, base + MSG_SCRATCH_HDR, (U32)flags);
+    if (smsg) {
+        klog_fmt("SMSG pid=%d tid=%d fd=0x%llx GATHERED total=%u ctllen32=%u -> ksendmsg rc=%d",
+                 (int)(thread->process ? thread->process->id : -1), (int)thread->id,
+                 (unsigned long long)fd, (unsigned)total, (unsigned)ctllen32, (int)(S32)rc);
+    }
     // Record the SEND side of fd-passing in the crashring ('S'). get_handle_fd
     // (wineserver -> client) is the request that precedes the deterministic
     // teardown crash; seeing whether/which fd wineserver actually sent (and
@@ -2862,14 +2926,39 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         crashRingRecordRead('M', (U32)thread->process->id, (U32)fd, head, (U32)rc,
                             want, (U32)m32->readd(base + MSG_SCRATCH_HDR + 20));
     }
+    // BW64_S2C: dump an S2C datagram as the RECEIVER (e.g. launchd) sees it —
+    // call_number 0x52cca11 at the head of the received body. Compare against the
+    // S2C SEND dump to verify our transport delivers it intact (byte count +
+    // any SCM_RIGHTS fd). If the receiver never logs an S2C RECV while the sender
+    // logged an S2C SEND, the datagram was lost/mis-queued; if the bytes/fd
+    // differ, the framing is wrong (cf the S6 cmsg bug).
+    if (getenv("BW64_S2C") && (S32)rc >= 8 && fd >= 0x2000) {
+        U32 cn = m32->readd(dataAddr + 0);
+        if (cn == 0x52cca11u) {
+            char hex[48 * 3 + 1]; int n = rc < 48 ? (int)rc : 48; int o = 0;
+            for (int i = 0; i < n && o + 3 < (int)sizeof(hex); i++) o += snprintf(hex + o, sizeof(hex) - o, "%02x ", m32->readb(dataAddr + i));
+            klog_fmt("S2C RECV pid=%d tid=%d fd=0x%llx rc=%d ctllen32=%d s2c_number=%d bytes=[%s]",
+                     (int)thread->process->id, (int)thread->id, (unsigned long long)fd,
+                     (int)(S32)rc, (int)m32->readd(base + MSG_SCRATCH_HDR + 20),
+                     (int)m32->readd(dataAddr + 4), hex);
+            // Arm a full syscall trace for THIS thread from here on, so the next
+            // few syscalls (the munmap + push_reply the S2C handler is supposed to
+            // make) — or the lack of them — are visible right up to the crash.
+            extern int g_s2cTraceTid;
+            g_s2cTraceTid = (int)thread->id;
+        }
+    }
+
     if ((S32)rc < 0) return (U64)(S64)(S32)rc;
 
     // Scatter the received bytes back into the 64-bit iov segments.
     U32 remaining = (U32)rc;
     U32 off = 0;
+    U64 firstIovBase = 0;
     for (U64 i = 0; i < iovlen && remaining; i++) {
         U64 b = cpu->memory->readq(iov + 16 * i);
         U64 l = cpu->memory->readq(iov + 16 * i + 8);
+        if (i == 0) firstIovBase = b;
         U32 chunk = (U32)((l < remaining) ? l : remaining);
         if (chunk) {
             std::vector<U8> tmp(chunk);
@@ -2878,6 +2967,24 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
             off += chunk;
             remaining -= chunk;
         }
+    }
+    // BW64_S2C: after scattering an S2C datagram into the guest's iov, read the
+    // call_number BACK from the guest's iov_base (the 64-bit address the guest's
+    // dispatch code will `cmpl $0x52cca11,(iov_base)` against). If this is not
+    // 0x52cca11 the scatter mis-placed the data and the guest's dispatch faults.
+    // Also re-read msg_iov / iov[0] from the guest msghdr, which the guest derefs
+    // as msg_arg->[0x10]->[0] right after recvmsg returns — to confirm those are
+    // intact (the suspected crash site: zero syscalls run after S2C RECV).
+    if (getenv("BW64_S2C") && fd >= 0x2000 && firstIovBase &&
+        m32->readd(dataAddr + 0) == 0x52cca11u) {
+        U32 cnBack = cpu->memory->readd(firstIovBase + 0);
+        U32 s2cBack = cpu->memory->readd(firstIovBase + 4);
+        U64 guestIovPtr = cpu->memory->readq(msg64 + 16);          // msg_iov
+        U64 guestIov0Base = guestIovPtr ? cpu->memory->readq(guestIovPtr) : 0;
+        klog_fmt("S2C VERIFY iov0base=0x%llx cn@base=0x%x s2c@base=%d | msg_iov=0x%llx iov[0].base=0x%llx (match=%d)",
+                 (unsigned long long)firstIovBase, cnBack, (int)s2cBack,
+                 (unsigned long long)guestIovPtr, (unsigned long long)guestIov0Base,
+                 (guestIov0Base == firstIovBase) ? 1 : 0);
     }
 
     // SOCK_DGRAM: copy the sender address back to the guest's msg_name, and
@@ -3132,7 +3239,9 @@ void ksyscall64(CPU64* cpu) {
         static const char* tracePidEnv = getenv("BW64_TRACEPID");
         static int tracePid = tracePidEnv ? atoi(tracePidEnv) : -1;
         int myPid = (int)(cpu->thread ? cpu->thread->process->id : -1);
-        if (getenv("BW64_SYSTRACE") || (tracePid >= 0 && myPid == tracePid)) {
+        int myTid = (int)(cpu->thread ? cpu->thread->id : -1);
+        if (getenv("BW64_SYSTRACE") || (tracePid >= 0 && myPid == tracePid) ||
+            (g_s2cTraceTid != 0 && myTid == g_s2cTraceTid)) {
             klog_fmt("SYS64 [pid=%d tid=%d] #%llu %s (a1=0x%llx a2=0x%llx a3=0x%llx) rip=0x%llx",
                      myPid, (int)(cpu->thread ? cpu->thread->id : -1),
                      (unsigned long long)nr, x64SyscallName(nr),
@@ -3416,6 +3525,15 @@ void ksyscall64(CPU64* cpu) {
             // regresses boot (wine/wineserver lazily re-read munmap'd regions —
             // zero-filled reads trip asserts), so the backing store is kept; the
             // memory is already bounded by lazy commit on the mmap side.
+            // BW64_S2C: a large munmap in the 0x800000000+ Mach OOL range is the
+            // guest-side S2C munmap handler running — log it so we see whether the
+            // S2C upcall reaches the actual munmap and what it returns.
+            if (getenv("BW64_S2C") && a2 >= 0x100000 && a1 >= 0x800000000ull) {
+                klog_fmt("S2C MUNMAP pid=%d tid=%d addr=0x%llx len=0x%llx",
+                         (int)(cpu->thread && cpu->thread->process ? cpu->thread->process->id : -1),
+                         (int)(cpu->thread ? cpu->thread->id : -1),
+                         (unsigned long long)a1, (unsigned long long)a2);
+            }
             ret = cpu->memory->munmap(a1, a2);
             break;
         case X64_SYS_shmget:
@@ -4172,8 +4290,27 @@ void ksyscall64(CPU64* cpu) {
                     cpu->thread->memory->memcpy(dataAddr + (U32)off, tmp, chunk);
                     off += chunk;
                 }
+                // Translate the destination sockaddr (a5, a6) into the scratch and
+                // pass it to ksendto. Dropping it (the old code passed 0,0) breaks
+                // any sendto on an UNCONNECTED AF_UNIX dgram socket: the darling
+                // S2C push_reply is exactly such a send — libsystem_kernel's
+                // __dserver_rpc_hooks_push_reply does sendto(rpc_fd, reply, len, 0,
+                // &darlingserver_addr, addrlen) to return an S2C op result. With the
+                // dest dropped the reply never reached darlingserver, the S2C never
+                // completed, and launchd's mach_msg_overwrite aborted with -107.
+                // sockaddr_un is layout-identical 32/64-bit (family + path), so a
+                // byte copy into MSG_SCRATCH_NAME is correct.
+                U32 destAddr32 = 0, destLen32 = 0;
+                if (a5 && a6) {
+                    U32 dl = (U32)a6; if (dl > 128) dl = 128;
+                    std::vector<U8> sa((size_t)dl);
+                    cpu->memory->memcpyFromGuest(sa.data(), a5, dl);
+                    cpu->thread->memory->memcpy(scratch + MSG_SCRATCH_NAME, sa.data(), dl);
+                    destAddr32 = scratch + MSG_SCRATCH_NAME;
+                    destLen32 = dl;
+                }
                 ret = (U64)(S64)(S32)ksendto(cpu->thread, (U32)a1, dataAddr, (U32)len,
-                                             (U32)a4, 0, 0);
+                                             (U32)a4, destAddr32, destLen32);
             } else {
                 S32 rc = (S32)krecvfrom(cpu->thread, (U32)a1, dataAddr, (U32)len,
                                         (U32)a4, 0, 0);
@@ -4264,6 +4401,25 @@ void ksyscall64(CPU64* cpu) {
                 if (chunk > 65536) chunk = 65536; // bounce in bounded steps
                 std::vector<U8> buf((size_t)chunk);
                 if (isRead) {
+                    // BW64_S2C: for a LARGE remote read (the OOL Mach buffer the
+                    // S2C path copies out), probe how many source pages are
+                    // actually committed. memcpyFromGuest ZERO-FILLS uncommitted
+                    // pages, so an OOL region that the sender only reserved (lazy
+                    // commit) would be read as zeros here -> a corrupt Mach msg ->
+                    // launchd mach_msg -107. Count committed vs total pages touched.
+                    if (getenv("BW64_S2C") && rLen >= 0x100000) {
+                        U64 pg0 = (rBase + rOff) >> 12;
+                        U64 pgN = ((rBase + rOff + chunk - 1) >> 12);
+                        U64 comm = 0, tot = 0;
+                        for (U64 p = pg0; p <= pgN; p++, tot++)
+                            if (remoteMem->getCommittedPagePtr(p)) comm++;
+                        static U64 s2cReadComm = 0, s2cReadTot = 0;
+                        s2cReadComm += comm; s2cReadTot += tot;
+                        if (rOff + chunk >= rLen)
+                            klog_fmt("S2C READ-PROBE remoteBase=0x%llx rLen=0x%llx committedPages=%llu/%llu (uncommitted read as ZERO)",
+                                     (unsigned long long)rBase, (unsigned long long)rLen,
+                                     (unsigned long long)s2cReadComm, (unsigned long long)s2cReadTot);
+                    }
                     // read from remote -> write to local
                     remoteMem->memcpyFromGuest(buf.data(), rBase + rOff, chunk);
                     localMem->memcpyToGuest(lBase + lOff, buf.data(), chunk);
