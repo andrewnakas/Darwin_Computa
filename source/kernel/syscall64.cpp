@@ -378,6 +378,29 @@ static U64 sys_write64(CPU64* cpu, U64 fd, U64 buf, U64 count) {
     std::vector<U8> buffer((size_t)count + 1);
     cpu->memory->memcpyFromGuest(buffer.data(), buf, count);
     buffer[count] = 0;
+    // BW64_LAUNCHMSG (S20): launchctl submits each LaunchDaemon job dict to
+    // launchd over the launchd control socket. liblaunch uses sendmsg(), but if
+    // the guest libc lowers that to write()/writev() on the connected SOCK_STREAM
+    // (or the submit takes any other write path) sys_sendmsg64 never sees it. So
+    // ALSO scan write payloads here for the literal "RunAtLoad" key — a launch
+    // job dict carries it as inline ASCII on every transport. This is the
+    // catch-all that answers whether the 20 job dicts ever leave launchctl.
+    if (getenv("BW64_LAUNCHMSG") && fd > 2 && fd < 0x2000) {
+        U32 wpid = (cpu->thread && cpu->thread->process) ? cpu->thread->process->id : 0;
+        if (count > 64) {
+            klog_fmt("SOCKWRITE-W pid=%u fd=%llu count=%llu",
+                     (unsigned)wpid, (unsigned long long)fd, (unsigned long long)count);
+        }
+        for (U64 i = 0; i + 9 <= count && i < 1048576; i++) {
+            if (buffer[i] == 'R' && buffer[i+1] == 'u' && buffer[i+2] == 'n' &&
+                buffer[i+3] == 'A' && buffer[i+8] == 'd' &&
+                buffer[i+4] == 't' && buffer[i+5] == 'L') { // "RunAtLoad"
+                klog_fmt("LAUNCHMSG-WRITE pid=%u fd=%llu count=%llu (carries RunAtLoad)",
+                         (unsigned)wpid, (unsigned long long)fd, (unsigned long long)count);
+                break;
+            }
+        }
+    }
     if (fd == 1 || fd == 2) {
         // Tee stdout/stderr to host console so ld-linux + glibc diagnostics
         // surface immediately. Also forward to the kobject so anything
@@ -2704,6 +2727,75 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         total += (U32)l;
     }
 
+    // BW64_LAUNCHMSG: log every non-trivial sendmsg on a low (non-dserver) guest
+    // socket fd, so a launchd-socket submit is visible even if the magic/RunAtLoad
+    // content scan misses it. fd < 0x2000 excludes the dserver RPC sockets.
+    if (getenv("BW64_LAUNCHMSG") && total > 64 && fd >= 3 && fd < 0x2000) {
+        klog_fmt("SOCKWRITE pid=%d tid=%d fd=0x%llx total=%u",
+                 (int)(thread->process ? thread->process->id : -1), (int)thread->id,
+                 (unsigned long long)fd, (unsigned)total);
+    }
+
+    // BW64_LAUNCHMSG (S20): decode a liblaunch submit-job message. launchctl
+    // submits each LaunchDaemon to launchd NOT over a Mach MIG RPC but over the
+    // launchd AF_UNIX SOCK_STREAM control socket, via launchd_msg_send(): a
+    // sendmsg() whose payload is launch_msg_header{u64 len; u64 magic} followed
+    // by a launch_data_pack() blob. The blob serializes the job dict as flat
+    // type-tagged nodes (host2wire = big-endian), with dictionary KEYS stored as
+    // inline NUL-terminated STRINGS. So the keys that decide whether launchd
+    // parks or starts a job — "Label", "RunAtLoad", "KeepAlive",
+    // "ProgramArguments" — appear verbatim as ASCII in the gathered buffer. We
+    // detect the message by its header magic (LAUNCH_MSG_HEADER_MAGIC =
+    // 0xD2FEA02366B39A41, stored big-endian on the wire) at byte offset 8, then
+    // dump every printable run >=3 chars. If a submitted dict is MISSING
+    // RunAtLoad/KeepAlive here, that pins the S20 park to launch_data submit
+    // serialization (the dict's start-trigger keys are lost in transit, so
+    // jobmgr_dispatch_all finds nothing to start) rather than to launchd's
+    // global_on_demand release (which BW64_MACHBODY already proved is delivered).
+    if (getenv("BW64_LAUNCHMSG") && total >= 16) {
+        // Magic on the wire is big-endian; accept either byte order to be robust.
+        static const U8 magBE[8] = {0xD2,0xFE,0xA0,0x23,0x66,0xB3,0x9A,0x41};
+        static const U8 magLE[8] = {0x41,0x9A,0xB3,0x66,0x23,0xA0,0xFE,0xD2};
+        U8 mg[8];
+        for (int i = 0; i < 8; i++) mg[i] = m32->readb(dataAddr + 8 + i);
+        bool isLaunchMsg = (memcmp(mg, magBE, 8) == 0) || (memcmp(mg, magLE, 8) == 0);
+        // Fallback: even if the header magic is absent (the submit may travel
+        // over a path we mis-fingerprint, or split across sendmsg chunks), scan
+        // the WHOLE gathered payload for the literal key "RunAtLoad" — a launch
+        // job dict on any transport must carry it as inline ASCII. This tells us
+        // unambiguously whether the 20 job dicts cross THIS sendmsg at all.
+        if (!isLaunchMsg && total >= 16) {
+            for (U32 i = 0; i + 9 <= total && i < 1048576; i++) {
+                if (m32->readb(dataAddr + i) == 'R' &&
+                    m32->readb(dataAddr + i + 1) == 'u' &&
+                    m32->readb(dataAddr + i + 2) == 'n' &&
+                    m32->readb(dataAddr + i + 3) == 'A' &&
+                    m32->readb(dataAddr + i + 8) == 'd') { // "RunAtLoad"
+                    isLaunchMsg = true; break;
+                }
+            }
+        }
+        if (isLaunchMsg) {
+            // Collect printable ASCII runs (>=3 chars) from the packed blob so the
+            // dict keys/values (Label, RunAtLoad, ProgramArguments, ...) are legible.
+            std::string strs;
+            int runLen = 0; char run[256];
+            for (U32 i = 16; i < total && i < 16384 && strs.size() < 3500; i++) {
+                U8 c = m32->readb(dataAddr + i);
+                if (c >= 0x20 && c < 0x7f) {
+                    if (runLen < (int)sizeof(run) - 1) run[runLen++] = (char)c;
+                } else {
+                    if (runLen >= 3) { run[runLen] = 0; strs += run; strs += ' '; }
+                    runLen = 0;
+                }
+            }
+            if (runLen >= 3) { run[runLen] = 0; strs += run; }
+            klog_fmt("LAUNCHMSG pid=%d tid=%d fd=0x%llx total=%u strs=[%s]",
+                     (int)(thread->process ? thread->process->id : -1), (int)thread->id,
+                     (unsigned long long)fd, (unsigned)total, strs.c_str());
+        }
+    }
+
     // BW64_S2C: dump the wire bytes of an S2C call (server->client memory upcall).
     // call_number == 0x52cca11 (dserver_callnum_s2c). darlingserver, to deliver a
     // Mach msg carrying OUT-OF-LINE memory, sends this on the RECEIVER's RPC
@@ -2775,6 +2867,78 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
                      (int)cpu->thread->id, option,
                      (option & 0x1) ? "SEND" : "", (option & 0x2) ? "|RCV" : "",
                      sendSize, rcvName, bits, sz, remote, local, (int)msgid);
+            // BW64_MACHBODY (S20): dump the mach message BODY past the 24-byte
+            // mach_msg_header_t. For a COMPLEX message (bits&0x80000000) the body
+            // is mach_msg_body_t{u32 descriptor_count} + N descriptors; an OOL
+            // (out-of-line) descriptor is {u64 address; u32 size; u8 dealloc; u8
+            // copy; u16 type=0x01} and carries the serialized launch_data job dict
+            // in the SENDER's memory at `address`. For a simple message the body
+            // is the inline MIG args. We dump (a) the first 48 body bytes inline,
+            // and (b) for the first COMPLEX descriptor, the first 96 bytes of the
+            // OOL payload it points at — that payload is the XPC/launch_data blob
+            // whose keys (RunAtLoad, Label, KeepAlive, the global_on_demand op)
+            // decide whether launchd parks or dispatches the job. This is the S20
+            // instrument: confirm RunAtLoad is present in each submitted job dict
+            // and whether a distinct global_on_demand set-false message is sent.
+            if (getenv("BW64_MACHBODY") && msgPtr && cpu->memory && (option & 0x1) &&
+                (sz >= 24 || sendSize >= 24)) {
+                char bhex[48 * 3 + 1]; int bo = 0;
+                for (int i = 0; i < 48 && bo + 3 < (int)sizeof(bhex); i++)
+                    bo += snprintf(bhex + bo, sizeof(bhex) - bo, "%02x ",
+                                   cpu->memory->readb(msgPtr + 24 + i));
+                klog_fmt("MACHBODY pid=%d tid=%d id=%d complex=%d body=[%s]",
+                         (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                         (int)cpu->thread->id, (int)msgid,
+                         (bits & 0x80000000u) ? 1 : 0, bhex);
+                if (bits & 0x80000000u) {
+                    // Complex body: mach_msg_body_t{u32 descriptor_count} at +24,
+                    // then `descriptor_count` descriptors. Descriptors are NOT all
+                    // 16 bytes: a 64-bit OOL descriptor (mach_msg_ool_descriptor64_t)
+                    // is 16 bytes {u64 address; u32 size; u8 dealloc; u8 copy; u8
+                    // pad; u8 type}, a port descriptor is 16 bytes, an OOL-ports
+                    // descriptor is also 16. The TYPE byte sits at descriptor+15
+                    // (the last byte) in the 64-bit ABI; type 0=port, 1=OOL,
+                    // 2=OOL_PORTS, 3=OOL_VOLATILE. We walk each descriptor by its
+                    // type so we don't (as the first naive version did) misread a
+                    // leading PORT descriptor's bytes as an OOL address — that bug
+                    // produced bogus addr=0xb03/size=1.2M lines. For every OOL
+                    // descriptor we dump the ASCII strings of its payload, because
+                    // a launch_data / XPC job dict stores its keys+values (Label,
+                    // RunAtLoad, KeepAlive, ProgramArguments, the daemon label) as
+                    // inline strings — the S20 question is whether the 20 submitted
+                    // job dicts (and their start-trigger keys) actually cross here.
+                    U32 descCount = cpu->memory->readd(msgPtr + 24);
+                    U64 dpos = msgPtr + 28; // first descriptor
+                    for (U32 di = 0; di < descCount && di < 8; di++) {
+                        U8 dtype = cpu->memory->readb(dpos + 15);
+                        if (dtype == 1 || dtype == 3) { // OOL / OOL_VOLATILE
+                            U64 oolAddr = ((U64)cpu->memory->readd(dpos + 0)) |
+                                          (((U64)cpu->memory->readd(dpos + 4)) << 32);
+                            U32 oolSize = cpu->memory->readd(dpos + 8);
+                            std::string strs; int runLen = 0; char run[256];
+                            U32 cap = oolSize < 2048 ? oolSize : 2048;
+                            for (U32 i = 0; oolAddr && i < cap; i++) {
+                                U8 c = cpu->memory->readb(oolAddr + i);
+                                if (c >= 0x20 && c < 0x7f) {
+                                    if (runLen < (int)sizeof(run) - 1) run[runLen++] = (char)c;
+                                } else {
+                                    if (runLen >= 3) { run[runLen] = 0; strs += run; strs += ' '; }
+                                    runLen = 0;
+                                }
+                            }
+                            if (runLen >= 3) { run[runLen] = 0; strs += run; }
+                            klog_fmt("MACHBODY   desc[%u] OOL addr=0x%llx size=%u strs=[%s]",
+                                     (unsigned)di, (unsigned long long)oolAddr,
+                                     (unsigned)oolSize, strs.c_str());
+                            dpos += 16;
+                        } else { // port (0) / ool_ports (2) — 16 bytes, skip
+                            klog_fmt("MACHBODY   desc[%u] type=%u (non-OOL, skipped)",
+                                     (unsigned)di, (unsigned)dtype);
+                            dpos += 16;
+                        }
+                    }
+                }
+            }
         }
         if (getenv("BW64_RPCARG") && total >= 20) {
             U32 a0 = m32->readd(dataAddr + 16);
