@@ -1077,8 +1077,28 @@ static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mo
     // exactly which directories the failing loader enumerates while hunting for
     // kernel32.dll, and whether the open itself succeeds.
     if (getenv("BW64_DIRTRACE") && ((flags & 0x10000) != 0)) {
-        klog_fmt("DIRTRACE pid=%d OPENDIR '%s' -> fd %d (flags=0x%llx)",
-                 (int)process->id, path, (int)result->handle, (unsigned long long)flags);
+        // Also resolve the node behind the new fd and report whether it's a
+        // directory + its child count — so we can tell a real empty dir from a
+        // mis-resolved node (the S17 LaunchDaemons wall: opendir succeeds but the
+        // node carries 0 children / isn't a dir, so glob/readdir surfaces nothing).
+        int isDir = -1; U32 childCount = 0; const char* nodePath = "?";
+        std::shared_ptr<KFile> kf = std::dynamic_pointer_cast<KFile>(result->kobject);
+        if (kf && kf->openFile && kf->openFile->node) {
+            isDir = kf->openFile->node->isDirectory() ? 1 : 0;
+            nodePath = kf->openFile->node->path.c_str();
+            if (isDir) childCount = kf->openFile->getDirectoryEntryCount();
+        }
+        klog_fmt("DIRTRACE pid=%d OPENDIR '%s' -> fd %d (flags=0x%llx) node='%s' isDir=%d children=%u",
+                 (int)process->id, path, (int)result->handle, (unsigned long long)flags,
+                 nodePath, isDir, childCount);
+    }
+    // BW64_DIRTRACE: also log REGULAR-file opens of LaunchDaemons/LaunchAgents
+    // plists — proves launchctl actually reads each daemon plist after the dir
+    // listing (so a missing service-spawn is downstream at launchd's job_start
+    // fork, not a readdir gap).
+    if (getenv("BW64_DIRTRACE") && (strstr(path, "LaunchDaemons/") || strstr(path, "LaunchAgents/")) &&
+        ((flags & 0x10000) == 0)) {
+        klog_fmt("DIRTRACE pid=%d PLISTOPEN '%s' -> fd %d", (int)process->id, path, (int)result->handle);
     }
     // Feed the GUI loading screen's activity log: surface the meaningful things
     // wine loads during the boot storm (DLLs/EXEs, the graphics/font stack) so
@@ -1183,8 +1203,8 @@ static U64 sys_getdents64_real(CPU64* cpu, U64 fd, U64 dirp, U64 count) {
             found++;
             if (strcasecmp(nm.c_str(), "kernel32.dll") == 0) hasK32 = true;
         }
-        klog_fmt("DIRTRACE pid=%d path='%s' entries=%u realFound=%d fp=%u kernel32=%d",
-                 (int)cpu->thread->process->id,
+        klog_fmt("DIRTRACE pid=%d fd=%llu path='%s' entries=%u realFound=%d fp=%u kernel32=%d",
+                 (int)cpu->thread->process->id, (unsigned long long)fd,
                  openNode->node->path.c_str(), entries, found,
                  (U32)openNode->getFilePointer(), hasK32 ? 1 : 0);
     }
