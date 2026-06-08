@@ -1036,6 +1036,31 @@ static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mo
         std::memset(path, 0, sizeof(path));
         std::strncpy(path, process->exe.c_str(), sizeof(path) - 1);
     }
+    // /proc/self/mounts and /proc/self/mountinfo: Apple libc's statfs->BSD
+    // converter (statfs_linux_to_bsd64) opens these to fill f_mntonname /
+    // f_fstypename for fstatfs(2). mldr's vchroot rewrites the path to the
+    // PREFIXED form (e.g. /usr/libexec/darling/proc/self/mounts), and we only
+    // register /proc/mounts at the bare path, so the prefixed open ENOENTs ->
+    // fstatfs fails -> glob/fts ABANDONS the directory it just opened (the S17
+    // wall: launchctl opendir's /System/Library/LaunchDaemons, fstatfs's the fd,
+    // gets the error, and closes it WITHOUT readdir -> no daemon plists load ->
+    // no services spawn). Redirect any path ENDING in proc/self/mounts[info] (or
+    // proc/<pid>/...) to the bare global virtual file so the converter succeeds.
+    {
+        const char* p = path;
+        size_t plen = std::strlen(p);
+        auto endsWith = [&](const char* suf) {
+            size_t sl = std::strlen(suf);
+            return plen >= sl && std::strcmp(p + plen - sl, suf) == 0;
+        };
+        // Match the bare and vchroot-prefixed self/<pid> forms by suffix; only act
+        // when the path is actually under a /proc/ tree.
+        if (std::strstr(p, "/proc/") && (endsWith("/mountinfo") || endsWith("/mounts"))) {
+            const char* target = endsWith("/mountinfo") ? "/proc/mountinfo" : "/proc/mounts";
+            std::memset(path, 0, sizeof(path));
+            std::strncpy(path, target, sizeof(path) - 1);
+        }
+    }
     // BW64_DLLPATH: trace the loader's DLL/dir search for the failing first
     // process — logs every path that mentions the wine install dir, system32,
     // or a builtin DLL, so we can see WHICH search dirs ntdll constructs (the
@@ -1099,6 +1124,13 @@ static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mo
     if (getenv("BW64_DIRTRACE") && (strstr(path, "LaunchDaemons/") || strstr(path, "LaunchAgents/")) &&
         ((flags & 0x10000) == 0)) {
         klog_fmt("DIRTRACE pid=%d PLISTOPEN '%s' -> fd %d", (int)process->id, path, (int)result->handle);
+    }
+    // BW64_LDTRACE: log EVERY open of a Launch*/Library path (dir or file) with
+    // its fd + O_DIRECTORY flag — so the glob reopen sequence (which fd maps to
+    // which path) is unambiguous.
+    if (getenv("BW64_LDTRACE") && (strstr(path, "Launch") || strstr(path, "Library"))) {
+        klog_fmt("LDTRACE pid=%d open '%s' -> fd %d (O_DIR=%d)", (int)process->id, path,
+                 (int)result->handle, (flags & 0x10000) ? 1 : 0);
     }
     // Feed the GUI loading screen's activity log: surface the meaningful things
     // wine loads during the boot storm (DLLs/EXEs, the graphics/font stack) so
@@ -1356,6 +1388,13 @@ static U64 sys_stat_path64(CPU64* cpu, U64 pathAddr, U64 statbuf, bool followSym
         klog_fmt("sys_stat_path64: '%s' (cwd='%s') -> %s", path,
                  cpu->thread->process->currentDirectory.c_str(),
                  node ? "OK" : "ENOENT");
+    }
+    // BW64_LDTRACE: light trace of stat/lstat on LaunchDaemons/Library paths so we
+    // can see whether glob lstats the literal `*.plist` pattern and our resolver
+    // wrongly returns OK (-> glob treats it as a literal, skips readdir).
+    if (getenv("BW64_LDTRACE") && (strstr(path, "Launch") || strstr(path, "Library"))) {
+        klog_fmt("LDTRACE pid=%d %sstat '%s' -> %s", (int)cpu->thread->process->id,
+                 followSymlink ? "" : "l", path, node ? "OK" : "ENOENT");
     }
     if (!node) return (U64)-2; // -ENOENT
     U64 size  = node->length();
@@ -1732,6 +1771,9 @@ static U64 sys_readlink64(CPU64* cpu, U64 pathAddr, U64 buf, U64 sz) {
     if (!pathAddr || !buf || sz == 0) return (U64)-K_EFAULT;
     char path[1024] = {0};
     cpu->memory->memcpyFromGuest(path, pathAddr, sizeof(path) - 1);
+    if (getenv("BW64_LDTRACE") && (strstr(path, "Launch") || strstr(path, "Library"))) {
+        klog_fmt("LDTRACE pid=%d readlink '%s'", (int)cpu->thread->process->id, path);
+    }
     KProcess* proc = cpu->thread->process.get();
     BString pidExe = B("/proc/") + BString::valueOf(proc->id) + B("/exe");
     BString resolved;

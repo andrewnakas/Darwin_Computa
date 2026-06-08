@@ -180,6 +180,17 @@ void StartUpArgs::buildVirtualFileSystem() {
     Fs::addVirtualFile(B("/proc/mounts"), [](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
         return new BufferAccess(node, flags, B("proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n/dev/nvme0n1p5 / ext4 rw,relatime,errors=remount-ro 0 0\nudev /dev devtmpfs rw,nosuid,relatime,size=16371216k,nr_inodes=4092804,mode=755,inode64 0 0"));
         }, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
+    // /proc/mountinfo: the kernel's richer mount table. Apple libc's
+    // statfs->BSD converter (statfs_linux_to_bsd64, behind fstatfs(2)) reads
+    // /proc/self/mountinfo to fill the Darwin statfs f_mntonname/f_fstypename;
+    // sys_openat64 redirects the (vchroot-prefixed) /proc/{self,<pid>}/mountinfo
+    // here. Format: mountID parentID major:minor root mountPoint opts - fstype
+    // source superOpts. A single "/" ext4 mount lets the converter resolve any fd
+    // to "/" and report ext4 — without it fstatfs failed and glob/fts abandoned
+    // every directory it opened (the S17 LaunchDaemons-enumeration wall).
+    Fs::addVirtualFile(B("/proc/mountinfo"), [](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+        return new BufferAccess(node, flags, B("21 1 259:5 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p5 rw,errors=remount-ro\n22 21 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:2 - proc proc rw\n23 21 0:6 / /dev rw,nosuid,relatime shared:3 - devtmpfs udev rw,size=16371216k,nr_inodes=4092804,mode=755,inode64\n"));
+        }, K__S_IREAD, k_mdev(0, 0), KSystem::procNode);
     Fs::addVirtualFile(B("/proc/cmdline"), openKernelCommandLine, K__S_IREAD, k_mdev(0, 0), KSystem::procNode); // kernel command line
     Fs::addVirtualFile(B("/dev/fb0"), openDevFB, K__S_IREAD | K__S_IWRITE | K__S_IFCHR, k_mdev(0x1d, 0), devNode);
     Fs::addVirtualFile(B("/dev/input/mice"), openDevInputTouch, K__S_IWRITE | K__S_IREAD | K__S_IFCHR, k_mdev(0xd, 0x43), inputNode);
