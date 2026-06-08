@@ -2625,6 +2625,36 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         // pthread_canceled this is `action` (0=test,1=enable,2=disable); for
         // other calls it is whatever the RPC's first param is. Pins down WHICH
         // libpthread path drives the TID29 #31 spin (S14).
+        // BW64_MACHMSG: decode a mach_msg_overwrite (#38) RPC. The dserver body is
+        // callhdr(16) + msg(u64 @16) + option(u32 @24) + send_size(u32 @28) +
+        // rcv_size(u32 @32) + rcv_name(u32 @36) + timeout + priority + rcv_msg.
+        // `msg` points into the SENDER's guest memory at a mach_msg_header_t:
+        //   msgh_bits(0) msgh_size(4) msgh_remote_port(8) msgh_local_port(12)
+        //   msgh_voucher_port(16) msgh_id(20).
+        // remote_port = the DESTINATION (launchd's bootstrap port for a check_in);
+        // local_port = the REPLY port; msgh_id = the MIG routine number. option bit
+        // 0x1=MACH_SEND_MSG, 0x2=MACH_RCV_MSG (a combined RPC has both). This pins
+        // down whether launchctl's bootstrap #38 is a send+recv to launchd's port
+        // and which MIG routine it carries (S15 cross-process bootstrap wall).
+        if (getenv("BW64_MACHMSG") && callnum == 38 && total >= 40 && cpu->thread) {
+            U64 msgPtr = ((U64)m32->readd(dataAddr + 16)) | (((U64)m32->readd(dataAddr + 20)) << 32);
+            U32 option = m32->readd(dataAddr + 24);
+            U32 sendSize = m32->readd(dataAddr + 28);
+            U32 rcvName = m32->readd(dataAddr + 36);
+            U32 bits = 0, remote = 0, local = 0, msgid = 0, sz = 0;
+            if (msgPtr && cpu->thread->memory && (option & 0x1 /*SEND*/)) {
+                bits   = cpu->thread->memory->readd(msgPtr + 0);
+                sz     = cpu->thread->memory->readd(msgPtr + 4);
+                remote = cpu->thread->memory->readd(msgPtr + 8);
+                local  = cpu->thread->memory->readd(msgPtr + 12);
+                msgid  = cpu->thread->memory->readd(msgPtr + 20);
+            }
+            klog_fmt("MACHMSG pid=%d tid=%d opt=0x%x(%s%s) sendsz=%u rcvname=0x%x | bits=0x%x size=%u remote=0x%x local=0x%x id=%d",
+                     (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                     (int)cpu->thread->id, option,
+                     (option & 0x1) ? "SEND" : "", (option & 0x2) ? "|RCV" : "",
+                     sendSize, rcvName, bits, sz, remote, local, (int)msgid);
+        }
         if (getenv("BW64_RPCARG") && total >= 20) {
             U32 a0 = m32->readd(dataAddr + 16);
             klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u arg0=%d",
