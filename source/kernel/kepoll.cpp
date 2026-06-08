@@ -24,7 +24,8 @@
 
 #include <string.h>
 
-KEPoll::KEPoll() : KObject(KTYPE_EPOLL) {
+KEPoll::KEPoll() : KObject(KTYPE_EPOLL),
+    changeCond(std::make_shared<BoxedWineCondition>(B("KEPoll::changeCond"))) {
 }
 
 KEPoll::~KEPoll() {
@@ -87,6 +88,21 @@ void KEPoll::waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events) {
     // parent links). We can't selectively remove per-fd here without tracking
     // which we added, so we attempt removal on each armed registration's object
     // (REMOVE_PARENT is a no-op when the link isn't present).
+
+    // Also (un)link the membership-change condition. A poll-on-epoll waiter takes
+    // its parent links over the fd-set as it exists right now; if another thread
+    // later epoll_ctl(ADD)s a new fd and that fd becomes ready, the waiter would
+    // never wake because it was never linked to it. changeCond is signalled by
+    // ctl() on every ADD/MOD/DEL, so the waiter wakes, re-evaluates isReadReady,
+    // and re-links over the new set on its next waitForEvents pass. (launchd's
+    // kqueue_demand_loop blocks in select() on its epoll fd before libkqueue adds
+    // the proc-exit kqchan socket — without this the NOTE_EXIT never wakes it.)
+    if (events) {
+        BOXEDWINE_CONDITION_ADD_PARENT(this->changeCond, parentCondition);
+    } else {
+        BOXEDWINE_CONDITION_REMOVE_PARENT(this->changeCond, parentCondition);
+    }
+
     for (const auto& n : this->data) {
         Data* reg = n.value;
         if (!reg->armed) {
@@ -246,6 +262,14 @@ U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
             break;
         default:
             return -K_EINVAL;
+    }
+    // The monitored fd-set changed — wake any thread blocked in a poll-on-epoll
+    // select/poll on this epoll fd so it re-links over the new set (see
+    // waitForEvents). Without this a fd added after a waiter blocked is invisible
+    // to that waiter forever.
+    {
+        BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->changeCond);
+        BOXEDWINE_CONDITION_SIGNAL_ALL(this->changeCond);
     }
     return 0;
 }

@@ -72,6 +72,13 @@ private:
         bool armed = true;
     };
     BHashTable<U32, Data*> data;
+
+    // Signalled whenever the monitored fd-set changes (epoll_ctl ADD/MOD/DEL). A
+    // poll-on-epoll waiter (select/poll blocked on this epoll fd) parent-links
+    // this in waitForEvents so a membership change wakes it — otherwise an fd
+    // added AFTER the waiter blocked could never wake it (its parent links were
+    // taken over the fd-set as it was at block-entry). See kepoll.cpp.
+    BOXEDWINE_CONDITION changeCond;
 };
 
 #endif
