@@ -40,6 +40,7 @@ public:
     bool isOpen() override;
     bool isReadReady() override;
     bool isWriteReady() override;
+    U64 readReadySeq() override;
     void waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events) override;
     U32  writeNative(U8* buffer, U32 len) override;
     U32  readNative(U8* buffer, U32 len) override;
@@ -79,6 +80,19 @@ private:
     // added AFTER the waiter blocked could never wake it (its parent links were
     // taken over the fd-set as it was at block-entry). See kepoll.cpp.
     BOXEDWINE_CONDITION changeCond;
+
+    // Monotonic membership-change counter, bumped on every epoll_ctl ADD/MOD/DEL.
+    // Folded into readReadySeq() so that a NESTED epoll (this fd registered with
+    // EPOLLET inside an OUTER epoll — exactly libkqueue's layout: launchd watches
+    // its main kqueue epfd inside a demand-loop epfd) presents a rising readReadySeq
+    // edge when a new member fd is added/armed. Without an advancing seq, KObject's
+    // default readReadySeq()==0 leaves hasReadSeq false, so the outer EPOLLET
+    // registration can never re-fire POLLIN once it has latched it (lastReported) —
+    // a freshly-added-and-ready member (e.g. launchd's accepted job-submit socket)
+    // becomes readable on the inner epoll but the outer ET waiter never sees the
+    // edge. Same edge-membership family as the connect()/listen-fd readSeq bump (S23)
+    // and the S18 changeCond wake. See KEPoll::readReadySeq.
+    U64 changeSeq = 0;
 };
 
 #endif

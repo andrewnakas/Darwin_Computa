@@ -666,6 +666,17 @@ U32 KUnixSocketObject::bind(KThread* thread, const KFileDescriptorPtr& fd, U32 a
             return -K_EADDRINUSE;
         }
         BString fullpath = Fs::getFullPath(thread->process->currentDirectory, name);
+        // BW64_SCDUMP (S20): log the path a STREAM socket binds to. launchd binds
+        // its control socket here; launchctl later connect()s to the path launchd
+        // returns via the getsocket MIG. If launchctl's connect path (also logged
+        // under SCDUMP in KUnixSocketObject::connect) doesn't match this bound
+        // fullpath — e.g. a vchroot-prefix mismatch like the S7/S17 bugs — connect
+        // resolves no node and returns ECONNREFUSED, so launchctl silently drops
+        // the launchd connection and sends NO job submits (the S20 wall).
+        if (getenv("BW64_SCDUMP") && this->type == K_SOCK_STREAM) {
+            klog_fmt("KUnixSocket::bind STREAM pid=%d name='%s' fullpath='%s'",
+                     (int)thread->process->id, name.c_str(), fullpath.c_str());
+        }
         this->destAddress.family = family;
         strncpy(this->destAddress.data, fullpath.c_str(), sizeof(this->destAddress.data));
 		this->destAddress.data[sizeof(this->destAddress.data) - 1] = 0;
@@ -735,6 +746,17 @@ U32 KUnixSocketObject::connect(KThread* thread, const KFileDescriptorPtr& fd, U3
             if (node) {
                 kobject = node->kobject.lock();
             }
+            // BW64_SCDUMP (S20): report whether the connect target resolved to a
+            // bound unix-socket node. A "node=0" or "kobj=0" here on launchd's
+            // control-socket path is the S20 wall: launchctl's connect can't find
+            // launchd's bound socket -> ECONNREFUSED -> no job submits.
+            if (getenv("BW64_SCDUMP")) {
+                klog_fmt("KUnixSocket::connect RESOLVE pid=%d path='%s' node=%d kobj=%d type=%d cwd='%s'",
+                         (int)thread->process->id, this->destAddress.data,
+                         node ? 1 : 0, kobject ? 1 : 0,
+                         kobject ? (int)kobject->type : -1,
+                         thread->process->currentDirectory.c_str());
+            }
             if (!node || !kobject || kobject->type!=KTYPE_UNIX_SOCKET) {
                 this->destAddress.family = 0;
                 return -K_ECONNREFUSED;
@@ -776,6 +798,25 @@ U32 KUnixSocketObject::connect(KThread* thread, const KFileDescriptorPtr& fd, U3
                     BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(destination->lockCond);
                     std::shared_ptr< KUnixSocketObject> t = std::dynamic_pointer_cast<KUnixSocketObject>(shared_from_this());
                     destination->pendingConnections.push_back(t);
+                    // S23: a queued connection is a fresh POLLIN edge on the LISTENING
+                    // socket — bump readSeq so an EPOLLET waiter (libkqueue EVFILT_READ
+                    // on the listen fd) re-fires. isReadReady() already reports a
+                    // listener with pendingConnections as readable, but the kepoll ET
+                    // path masks a POLLIN it already latched (lastReported) unless
+                    // readReadySeq() advanced — exactly how write()/dgramSend signal a
+                    // data edge. Without this, launchd's listen fd stays edge-latched
+                    // and launchctl's connect() never wakes the runloop -> no accept(),
+                    // no job_import, no daemon spawn (the S23 wall, same family as
+                    // S18 epoll changeCond / S19 stream drain).
+                    destination->readSeq++;
+                    if (getenv("BW64_ACCEPT")) {
+                        klog_fmt("CONNQUEUE pid=%d -> listenSock boundPath='%s' pending=%d readSeq=%llu listening=%d (queued+edge-bumped)",
+                                 (int)thread->process->id,
+                                 destination->node ? destination->node->name.c_str() : "(none)",
+                                 (int)destination->pendingConnections.size(),
+                                 (unsigned long long)destination->readSeq,
+                                 (int)destination->listening);
+                    }
                     BOXEDWINE_CONDITION_SIGNAL_ALL(destination->lockCond);
                 }
 
@@ -827,6 +868,17 @@ U32 KUnixSocketObject::listen(KThread* thread, const KFileDescriptorPtr& fd, U32
 
 U32 KUnixSocketObject::accept(KThread* thread, const KFileDescriptorPtr& fd, U32 address, U32 len, U32 flags) {
     std::shared_ptr<KUnixSocketObject> pendingConnection;
+    // BW64_ACCEPT (S23): witness launchd's accept() on its submit listen socket.
+    // If this never logs, the listen-fd poll/epoll waiter never woke on launchctl's
+    // connect() (the wakeup-edge wall). If it logs ENTER but blocks (no EXIT), the
+    // pendingConnection wait isn't being signalled. If ENTER+EXIT but no daemon
+    // spawns, the wall moved downstream into job_import.
+    if (getenv("BW64_ACCEPT")) {
+        klog_fmt("ACCEPT ENTER pid=%d tid=%d boundPath='%s' pending=%d blocking=%d",
+                 (int)thread->process->id, (int)thread->id,
+                 this->node ? this->node->name.c_str() : "(none)",
+                 (int)this->pendingConnections.size(), (int)this->blocking);
+    }
     {
         BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
         while (!this->pendingConnections.size()) {
@@ -868,9 +920,13 @@ U32 KUnixSocketObject::accept(KThread* thread, const KFileDescriptorPtr& fd, U32
 
     resultSocket->connected = true;
     resultSocket->connection = pendingConnection; // weak reference
-    
+
     BOXEDWINE_CONDITION_SIGNAL_ALL(pendingConnection->lockCond);
 
+    if (getenv("BW64_ACCEPT")) {
+        klog_fmt("ACCEPT EXIT pid=%d tid=%d -> newfd=%d (accepted a connection)",
+                 (int)thread->process->id, (int)thread->id, (int)result->handle);
+    }
     return result->handle;
 }
 

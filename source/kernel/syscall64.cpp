@@ -5185,8 +5185,10 @@ void ksyscall64(CPU64* cpu) {
             ret = (U64)(S64)(S32)cpu->thread->process->epollctl((FD)a1, (U32)a2, (FD)a3, ev32);
             if (getenv("BW64_IPCDUMP")) {
                 U32 events = a4 ? cpu->thread->memory->readd(ev32 + 0) : 0;
-                klog_fmt("IPC epoll_ctl(epfd=%d, op=%d, fd=%d, events=0x%x) -> %d",
-                         (int)a1, (int)a2, (int)a3, events, (int)(S32)ret);
+                U64 udata = a4 ? cpu->thread->memory->readq(ev32 + 4) : 0;
+                klog_fmt("IPC epoll_ctl(epfd=%d, op=%d, fd=%d, events=0x%x, data=0x%llx) -> %d",
+                         (int)a1, (int)a2, (int)a3, events,
+                         (unsigned long long)udata, (int)(S32)ret);
             }
             break;
         }

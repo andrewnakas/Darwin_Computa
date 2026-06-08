@@ -156,6 +156,39 @@ bool KEPoll::isReadReady() {
     return false;
 }
 
+// Per-arrival readiness counter for a poll-on-epoll (or nested-epoll) waiter. The
+// outer EPOLLET registration only re-fires POLLIN on a rising readReadySeq edge
+// (kpoll.cpp internal_poll / kepoll.cpp wait). For a plain socket that seq is the
+// per-datagram/chunk counter; for an epoll fd "a fresh edge" means EITHER a member
+// produced fresh data (its own readReadySeq advanced) OR the membership changed (a
+// new fd added/armed, e.g. launchd's accepted job-submit socket joining the inner
+// kqueue epoll). Fold both: sum the armed members' readReadySeq plus changeSeq.
+// Monotonic enough — members' seqs only grow and changeSeq only grows — so the
+// outer ET waiter sees an edge exactly when something it cares about changed. A
+// non-zero return also flips hasReadSeq true so the rescue path engages at all.
+U64 KEPoll::readReadySeq() {
+    KThread* thread = KThread::currentThread();
+    if (!thread || !thread->process) {
+        return this->changeSeq;
+    }
+    U64 seq = this->changeSeq;
+    for (const auto& n : this->data) {
+        Data* reg = n.value;
+        if (!reg->armed) {
+            continue;
+        }
+        KFileDescriptor* pFD = thread->process->getFileDescriptor_nolock(reg->fd);
+        if (!pFD || !pFD->kobject) {
+            continue;
+        }
+        seq += pFD->kobject->readReadySeq();
+    }
+    // Never return 0 when we have any change history, so hasReadSeq latches true
+    // and the ET re-fire rescue can run (seq==0 is the "no per-arrival counter"
+    // sentinel in kpoll.cpp). +1 keeps it strictly positive once anything happened.
+    return seq ? seq + 1 : 0;
+}
+
 bool KEPoll::isWriteReady() {
     // You cannot write to an epoll fd; it is never selectable for write.
     return false;
@@ -269,6 +302,9 @@ U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
     // to that waiter forever.
     {
         BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->changeCond);
+        // Advance the membership-change seq so a nested-epoll EPOLLET registration
+        // in an outer epoll sees a rising readReadySeq edge (see readReadySeq).
+        this->changeSeq++;
         BOXEDWINE_CONDITION_SIGNAL_ALL(this->changeCond);
     }
     return 0;

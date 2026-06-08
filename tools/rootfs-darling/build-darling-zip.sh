@@ -162,6 +162,33 @@ if [ -d "$PREFIX" ]; then
         echo "WARNING: nested mldr missing from staged prefix!" >&2
     [ -e "$STAGE$PREFIX/sbin/launchd" ] || \
         echo "WARNING: launchd missing from staged prefix!" >&2
+    # S22 fix (Darwin_Computa): Darlings pid1 launchd skips ipc_server_init() — in
+    # _main the pid1_magic branch jmps PAST the ipc_server_init call that the
+    # per-user branch makes, so the System launchd never socket+bind+listens
+    # /var/tmp/launchd/sock. launchctl bootstrap -S System then cannot connect() to
+    # submit the 20 LaunchDaemon job dicts, so no daemon ever spawns. Retarget that
+    # jmp to land on the ipc_server_init callsite. The instruction is a 5-byte
+    # rel32 `jmp` (E9) at file offset 0x2772f; its disp32 (offset 0x27730) is
+    # d5 01 00 00 (-> 0x100027909, skipping ipc_server_init). Patch to 1a 01 00 00
+    # (-> 0x10002784e, the `call _ipc_server_init` site). Verify the bytes first so
+    # a future Darling rebuild with a different layout fails loud instead of
+    # corrupting the binary.
+    LD_BIN="$STAGE$PREFIX/sbin/launchd"
+    if [ -e "$LD_BIN" ]; then
+        cur=$(dd if="$LD_BIN" bs=1 skip=$((0x2772f)) count=5 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        if [ "$cur" = "e9d5010000" ]; then
+            printf '\x1a\x01\x00\x00' | dd of="$LD_BIN" bs=1 seek=$((0x27730)) count=4 conv=notrunc 2>/dev/null
+            echo "--- S22: patched launchd pid1 ipc_server_init jmp (0x27730 d5->1a) ---"
+        else
+            echo "WARNING: S22 launchd patch SKIPPED — bytes at 0x2772f are '$cur' not 'e9d5010000' (Darling layout changed; re-derive the offset)." >&2
+        fi
+    fi
+    # S22 fix: launchds ipc_server_init does a NON-recursive mkdir(/var/tmp/launchd);
+    # /var existed in the prefix but /var/tmp did not, so the mkdir ENOENT'd and
+    # ipc_server_init bailed before bind. Create /var/tmp (+ /private/var/tmp) in the
+    # Darwin prefix so the submit socket can be bound.
+    mkdir -p "$STAGE$PREFIX/var/tmp" "$STAGE$PREFIX/private/var/tmp"
+    chmod 1777 "$STAGE$PREFIX/var/tmp" "$STAGE$PREFIX/private/var/tmp" 2>/dev/null || true
     # Convenience symlink for the --darwin-run CLI / DYLD_ROOT_PATH examples.
     ln -sfn "$PREFIX" "$STAGE/darling-prefix" 2>/dev/null || true
 else

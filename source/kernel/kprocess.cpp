@@ -1044,16 +1044,24 @@ U32 KProcess::rmdir(BString path) {
 }
 
 U32 KProcess::mkdir(BString path) {
-    std::shared_ptr<FsNode> node = Fs::getNodeFromLocalPath(this->currentDirectory, path, false);   
+    std::shared_ptr<FsNode> node = Fs::getNodeFromLocalPath(this->currentDirectory, path, false);
     if (node) {
+        // BW64_SCDUMP (S22): trace launchd's ipc_server_init mkdir of /var/tmp/launchd
+        if (getenv("BW64_SCDUMP") && path.contains(B("launchd")))
+            klog_fmt("KProcess::mkdir pid=%d path='%s' -> EEXIST", (int)this->id, path.c_str());
         return -K_EEXIST;
     }
     BString fullpath = Fs::getFullPath(this->currentDirectory, path);
     BString parentPath = Fs::getParentPath(fullpath);
-    node = Fs::getNodeFromLocalPath(B(""), parentPath, false); 
+    node = Fs::getNodeFromLocalPath(B(""), parentPath, false);
     if (!node) {
+        if (getenv("BW64_SCDUMP") && path.contains(B("launchd")))
+            klog_fmt("KProcess::mkdir pid=%d path='%s' full='%s' parent='%s' -> ENOENT (parent missing)",
+                     (int)this->id, path.c_str(), fullpath.c_str(), parentPath.c_str());
         return -K_ENOENT;
     }
+    if (getenv("BW64_SCDUMP") && path.contains(B("launchd")))
+        klog_fmt("KProcess::mkdir pid=%d path='%s' full='%s' -> OK", (int)this->id, path.c_str(), fullpath.c_str());
     return Fs::makeLocalDirs(fullpath);
 }
 
