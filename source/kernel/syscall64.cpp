@@ -4374,8 +4374,23 @@ void ksyscall64(CPU64* cpu) {
                 ret = (U64)(S64)(S32)ksendto(cpu->thread, (U32)a1, dataAddr, (U32)len,
                                              (U32)a4, destAddr32, destLen32);
             } else {
+                static const bool kqtrace = getenv("BW64_KQTRACE") != nullptr;
+                if (kqtrace) {
+                    klog_fmt("KQTRACE pid=%d tid=%d recvfrom ENTER fd=%d len=%d flags=%x",
+                             (int)(cpu->thread->process?cpu->thread->process->id:-1),
+                             (int)cpu->thread->id, (int)a1, (int)len, (int)a4);
+                }
                 S32 rc = (S32)krecvfrom(cpu->thread, (U32)a1, dataAddr, (U32)len,
                                         (U32)a4, 0, 0);
+                if (kqtrace) {
+                    U32 b0=0,b1=0,b2=0;
+                    if (rc >= 4) b0 = cpu->thread->memory->readd(dataAddr);
+                    if (rc >= 8) b1 = cpu->thread->memory->readd(dataAddr+4);
+                    if (rc >= 12) b2 = cpu->thread->memory->readd(dataAddr+8);
+                    klog_fmt("KQTRACE pid=%d tid=%d recvfrom EXIT fd=%d rc=%d bytes=[%08x %08x %08x]",
+                             (int)(cpu->thread->process?cpu->thread->process->id:-1),
+                             (int)cpu->thread->id, (int)a1, (int)rc, b0, b1, b2);
+                }
                 if (rc > 0) {
                     U8 tmp[4096];
                     U64 off = 0;

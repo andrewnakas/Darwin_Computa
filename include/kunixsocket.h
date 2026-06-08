@@ -134,6 +134,11 @@ protected:
 
     U32 internal_write(KThread* thread, const std::shared_ptr<KUnixSocketObject>& con, BOXEDWINE_CONDITION& cond, U32 buffer, U32 len);
     U32 writePipeClosed(KThread* thread, bool noSignal);
+    // Flatten any fd-less STREAM frames queued in msgs (deposited by a peer's
+    // sendmsg(), each iovec length-prefixed) into the byte recvBuffer so a plain
+    // read()/recvfrom can consume them as a stream. Caller must hold lockCond.
+    // Frames carrying SCM_RIGHTS objects are left for recvmsg(). See read().
+    void drainStreamMsgsToRecvBuffer();
 };
 
 #endif

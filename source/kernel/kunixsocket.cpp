@@ -469,6 +469,39 @@ U32 KUnixSocketObject::readNative(U8* buffer, U32 len) {
     return len;
 }
 
+// Caller holds lockCond. Move fd-less STREAM frames out of msgs and into the byte
+// recvBuffer, stripping the 4-byte-per-iovec length prefix that sendmsg() writes
+// (see KUnixSocketObject::sendmsg). A frame carrying SCM_RIGHTS objects is left in
+// place — a byte read can't deliver passed fds, so it must stay for recvmsg(). We
+// stop at the first such frame to preserve in-order delivery.
+void KUnixSocketObject::drainStreamMsgsToRecvBuffer() {
+    if (this->type != K_SOCK_STREAM) {
+        return;
+    }
+    while (!this->msgs.empty()) {
+        std::shared_ptr<KSocketMsg>& msg = this->msgs.front();
+        if (!msg->objects.empty()) {
+            break; // has passed fds: leave for recvmsg(), keep ordering
+        }
+        // msg->data is a sequence of [u32 len][len bytes] frames (one per iovec
+        // the sender supplied). Strip each length prefix and append the payload.
+        const std::vector<U8>& d = msg->data;
+        size_t pos = 0;
+        while (pos + 4 <= d.size()) {
+            U32 frameLen = (U32)d[pos] | ((U32)d[pos + 1] << 8) | ((U32)d[pos + 2] << 16) | ((U32)d[pos + 3] << 24);
+            pos += 4;
+            if (pos + frameLen > d.size()) {
+                frameLen = (U32)(d.size() - pos); // defensive: truncated frame
+            }
+            if (frameLen) {
+                this->recvBuffer.put(d.data() + pos, frameLen);
+            }
+            pos += frameLen;
+        }
+        this->msgs.pop();
+    }
+}
+
 U32 KUnixSocketObject::read(KThread* thread, U32 buffer, U32 len) {
     return read(thread, buffer, len, 0);
 }
@@ -495,6 +528,19 @@ U32 KUnixSocketObject::read(KThread* thread, U32 buffer, U32 len, U32 flags) {
         return -K_EPIPE;
     con = nullptr; // don't hold a strong reference to this, if we are blocking then it would prevent the con object from being destroyed when its process is closed
     BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
+    // A connected STREAM peer that wrote via sendmsg() deposits length-prefixed
+    // frames into this->msgs (see KUnixSocketObject::sendmsg), NOT into the byte
+    // recvBuffer that write()/writev() feed. A plain read()/recvfrom on a stream
+    // socket must not care which send syscall the peer used — the wire is a byte
+    // stream either way. So flatten any fd-less queued frames into recvBuffer here
+    // (each iovec carries a 4-byte length prefix that we strip). darlingserver
+    // pushes a kqchan proc/mach_port notification exactly this way: it sendmsg()s
+    // the 12-byte dserver_kqchan_call_notification, then the client recvfrom()s it.
+    // Without this drain the notification sat unread in msgs and the read blocked
+    // forever (S19: launchd never acked the proc kqchan, so NOTE_EXIT stayed
+    // suppressed and no daemon spawned past launchctl). Frames carrying SCM_RIGHTS
+    // fds are left in msgs for recvmsg() — a byte read can't deliver fds anyway.
+    drainStreamMsgsToRecvBuffer();
     while (this->recvBuffer.size_used()==0) {
         if (this->inClosed) {
             return 0;
@@ -503,6 +549,7 @@ U32 KUnixSocketObject::read(KThread* thread, U32 buffer, U32 len, U32 flags) {
             return -K_EWOULDBLOCK;
         }
         BOXEDWINE_CONDITION_WAIT(this->lockCond);
+        drainStreamMsgsToRecvBuffer();
 #ifdef BOXEDWINE_MULTI_THREADED
 		if (thread->terminating) {
 			return -K_EINTR;
