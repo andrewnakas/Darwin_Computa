@@ -1746,10 +1746,16 @@ static void readStringArray64(CPU64* cpu, U64 arrayAddr, std::vector<BString>& o
 // rebuilding memory64/cpu64 fresh — see KProcess::execve's 64-bit reset). On
 // success execve never returns to the caller (the image is replaced); it returns
 // -K_CONTINUE which the dispatcher must NOT write into RAX.
-// BW64_CANCELEXIT=<name>: the learned target guest pid (set in sys_execve64 when the
-// re-exec argv0 matches the filter; -1 until then). cancelExitAppliesTo() (below)
-// scopes the #31->0 cancel-exit rewrite to ONLY this pid so launchd/daemons are safe.
-static int g_cancelExitPid = -1;
+// BW64_CANCELEXIT=<name>[,<name>...]: the set of learned target guest pids. sys_execve64
+// records a pid when the re-exec argv0 contains ANY of the comma-separated filter names.
+// cancelExitAppliesTo() (below) scopes the #31->0 cancel-exit rewrite to ONLY those pids.
+// This is deliberately a NAME ALLOW-LIST, never 'all'/exclude: the boot-critical chain
+// (launchd pid 26, launchctl pid 31) MUST NOT be rewritten — a stale thread-id-reuse
+// rewrite makes one of their threads exit, which stalls the daemon-spawn boot (launchd
+// dies after exec / launchctl's submit handoff stalls at pid31). A GUI app needs itself
+// PLUS the daemons it calls into (e.g. securityd), so name them all:
+// BW64_CANCELEXIT=akwin,securityd.
+static std::set<int> g_cancelExitPids;
 static U64 sys_execve64(CPU64* cpu, U64 pathAddr, U64 argvAddr, U64 envpAddr) {
     if (!cpu->thread || !cpu->thread->process) return (U64)-K_ENOSYS;
     if (!pathAddr) return (U64)-K_EFAULT;
@@ -1772,10 +1778,20 @@ static U64 sys_execve64(CPU64* cpu, U64 pathAddr, U64 argvAddr, U64 envpAddr) {
     // process — never launchd/daemons (whose premature thread-exit stalls the boot).
     if (const char* cef = getenv("BW64_CANCELEXIT")) {
         if (cef[0] && !(cef[0] == '1' && cef[1] == 0) && cpu->thread && cpu->thread->process) {
-            if ((!args.empty() && args[0].contains(cef)) || path.contains(cef)) {
-                g_cancelExitPid = (int)cpu->thread->process->id;
-                klog_fmt("CANCELEXIT: learned target pid=%d (argv0 matched '%s')",
-                         g_cancelExitPid, cef);
+            const char* a0 = args.empty() ? "" : args[0].c_str();
+            // Match argv0 against each comma-separated filter name; record this pid if any hit.
+            std::string list(cef);
+            size_t start = 0;
+            while (start < list.size()) {
+                size_t comma = list.find(',', start);
+                std::string name = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                start = (comma == std::string::npos) ? list.size() : comma + 1;
+                if (!name.empty() && ((a0 && strstr(a0, name.c_str())) || path.contains(name.c_str()))) {
+                    int pid = (int)cpu->thread->process->id;
+                    g_cancelExitPids.insert(pid);
+                    klog_fmt("CANCELEXIT: learned target pid=%d (argv0 matched '%s')", pid, name.c_str());
+                    break;
+                }
             }
         }
     }
@@ -2705,8 +2721,8 @@ static bool cancelExitEnabled() { static int e = getenv("BW64_CANCELEXIT") ? 1 :
 template <typename P> static bool cancelExitAppliesTo(const P& p) {
     if (!p) return false;
     static const char* filt = getenv("BW64_CANCELEXIT");
-    if (!filt || !filt[0] || (filt[0] == '1' && filt[1] == 0)) return true; // global (legacy)
-    return g_cancelExitPid >= 0 && (int)p->id == g_cancelExitPid;
+    if (!filt || !filt[0] || (filt[0] == '1' && filt[1] == 0)) return true; // global (legacy, UNSAFE)
+    return g_cancelExitPids.count((int)p->id) != 0;  // only the named processes' learned pids
 }
 
 // sendmsg(fd, msghdr*, flags) for a 64-bit guest. Gathers the scatter buffers

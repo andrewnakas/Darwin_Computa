@@ -335,6 +335,38 @@ _FCFONT="$STAGE$PREFIX/usr/lib/ruby/2.6.0/rdoc/generator/template/darkfish/fonts
 [ -f "$_FCFONT" ] && cp "$_FCFONT" "$STAGE/usr/share/fonts/Lato-Regular.ttf" || true
 echo "--- S31: staged bare /etc/fonts/fonts.conf + /usr/share/fonts (fontconfig) ---"
 
+# S32/S33: minimal Darwin user database so libinfo (libsystem_info) resolves the
+# current user (uid 0 = root) from FLAT FILES instead of the mach service. Every
+# Cocoa/Foundation app calls getpwuid/NSUserName during init; libinfo first tries
+# /etc/master.passwd|passwd|group, and ONLY falls through to the
+# com.apple.system.opendirectoryd.libinfo mach lookup when they are MISSING. With no
+# files staged, AppKit init spins forever on that bootstrap_look_up2 (opendirectoryd
+# does not service it under the emulator) — the S32 GUI wedge. These go under the
+# Darwin vchroot prefix ($STAGE$PREFIX/etc, mirrored to private/etc) because libinfo
+# resolves the vchroot-prefixed path (boot trace: open .../usr/libexec/darling/etc/master.passwd).
+mkdir -p "$STAGE$PREFIX/etc" "$STAGE$PREFIX/private/etc"
+cat > "$STAGE$PREFIX/etc/master.passwd" <<'PWEOF'
+root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+daemon:*:1:1::0:0:System Services:/var/empty:/usr/bin/false
+nobody:*:-2:-2::0:0:Unprivileged User:/var/empty:/usr/bin/false
+PWEOF
+cat > "$STAGE$PREFIX/etc/passwd" <<'PWEOF'
+root:*:0:0:System Administrator:/var/root:/bin/sh
+daemon:*:1:1:System Services:/var/empty:/usr/bin/false
+nobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false
+PWEOF
+cat > "$STAGE$PREFIX/etc/group" <<'PWEOF'
+wheel:*:0:root
+daemon:*:1:root
+nobody:*:-2:
+nogroup:*:-1:
+staff:*:20:root
+PWEOF
+cp "$STAGE$PREFIX/etc/master.passwd" "$STAGE$PREFIX/private/etc/master.passwd"
+cp "$STAGE$PREFIX/etc/passwd"        "$STAGE$PREFIX/private/etc/passwd"
+cp "$STAGE$PREFIX/etc/group"         "$STAGE$PREFIX/private/etc/group"
+echo "--- S33: staged /etc/{master.passwd,passwd,group} (libinfo flat-file fallback) ---"
+
 echo "--- staged tree ready ---"
 du -sh "$STAGE" || true
 '
