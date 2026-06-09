@@ -1423,9 +1423,20 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
     }
 
     BOXEDWINE_CRITICAL_SECTION_WITH_CONDITION(this->lockCond);
+    // A connected STREAM peer that wrote via sendmsg() deposits length-prefixed
+    // frames into this->msgs. recvmsg() on a STREAM socket is byte-stream
+    // semantics (no message boundaries, partial reads allowed), so flatten any
+    // fd-less queued frames into recvBuffer first — exactly as the read()/recvfrom
+    // path does (drainStreamMsgsToRecvBuffer). Without this, a single frame larger
+    // than the caller's first iovec (e.g. launchctl's 16KB SUBMITJOB to launchd's
+    // ipc_callback->launchd_msg_recv) fell through to the framed-msgs path below
+    // and hit `kpanic("unhandled socket msg logic")` at the len<dataLen guard,
+    // wedging launchd's job-submit read. The recvBuffer branch delivers a frame
+    // correctly across multiple iovecs and leaves the remainder for the next read.
+    drainStreamMsgsToRecvBuffer();
     while (!this->msgs.size()) {
         if (this->recvBuffer.size_used()) {
-            readMsgHdr(thread, address, &hdr);        
+            readMsgHdr(thread, address, &hdr);
             for (U32 i = 0; i < hdr.msg_iovlen; i++) {
                 U32 p = memory->readd(hdr.msg_iov + 8 * i);
                 U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
@@ -1486,19 +1497,40 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
         }
 		memory->writed(address + 20, i * 16); // msg_controllen
     }
+    // Deliver this frame's payload across the caller's iovecs. This path runs only
+    // for frames carrying SCM_RIGHTS objects (fd-less frames were pre-flattened into
+    // recvBuffer above). The frame data is a sequence of [u32 len][len bytes]
+    // sub-frames (one per sender iovec). A single sub-frame can be LARGER than the
+    // caller's iovecs (e.g. launchctl's 16KB SUBMITJOB carries a passed fd, so it
+    // lands here, but launchd reads it in 8KB chunks) — this used to
+    // kpanic("unhandled socket msg logic"). Instead, deliver what fits now (STREAM
+    // byte-stream semantics) and re-queue the unconsumed remainder into recvBuffer
+    // so the next recvmsg()/read() delivers it in order. The objects/cmsg are fully
+    // consumed on this first delivery, so the remainder is plain bytes.
+    // Flatten the frame's sub-frames into one contiguous byte stream (stripping the
+    // per-sub-frame length prefixes), then split it: as many bytes as the caller's
+    // iovecs hold are delivered now, the rest goes to recvBuffer for the next read.
     U32 pos = 0;
-    for (U32 i=0;i<hdr.msg_iovlen;i++) {
+    std::vector<U8> flat;
+    while (pos + 4 <= msg->data.size()) {
+        U32 dataLen = msg->data[pos] | (((U32)msg->data[pos + 1]) << 8) | (((U32)msg->data[pos + 2]) << 16) | (((U32)msg->data[pos + 3]) << 24);
+        pos += 4;
+        if (pos + dataLen > msg->data.size()) dataLen = (U32)(msg->data.size() - pos); // defensive
+        flat.insert(flat.end(), msg->data.begin() + pos, msg->data.begin() + pos + dataLen);
+        pos += dataLen;
+    }
+    U32 delivered = 0;
+    for (U32 i = 0; i < hdr.msg_iovlen && delivered < flat.size(); i++) {
         U32 p = memory->readd(hdr.msg_iov + 8 * i);
         U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
-        U32 dataLen = msg->data[pos] | (((U32)msg->data[pos + 1]) << 8) | (((U32)msg->data[pos + 2]) << 16) | (((U32)msg->data[pos + 3]) << 24);
-        pos+=4;
-        if (len<dataLen) {
-            kpanic("unhandled socket msg logic");
-        }
-        memory->memcpy(p, msg->data.data() + pos, dataLen);
-        pos+=dataLen;
-        result+=dataLen;
-    }  
+        U32 copyLen = std::min(len, (U32)flat.size() - delivered);
+        memory->memcpy(p, flat.data() + delivered, copyLen);
+        delivered += copyLen;
+        result += copyLen;
+    }
+    if (delivered < flat.size()) {
+        this->recvBuffer.put(flat.data() + delivered, (U32)flat.size() - delivered);
+    }
     if (!this->connection.expired()) {
         BOXEDWINE_CONDITION_SIGNAL_ALL(this->lockCond);
     }

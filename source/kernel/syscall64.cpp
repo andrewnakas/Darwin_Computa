@@ -3142,6 +3142,32 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
                  (int)thread->process->id, (int)fd, (int)want, (unsigned)flags,
                  (int)(S32)rc, (int)m32->readd(base + MSG_SCRATCH_HDR + 20));
     }
+    // S24: repair the darlingserver pthread_canceled (#31) reply. darlingserver's
+    // PthreadCanceled::processCall() is an unimplemented TODO stub that replies
+    // with code = -ENOSYS (-38). The reply wire layout is the 8-byte
+    // dserver_rpc_replyhdr_t { int32 number; int32 code }: number==31 identifies
+    // a pthread_canceled reply, code at offset 4 is the result. The XNU contract
+    // for __pthread_canceled(action 0 == query) is: 0 == "a cancel is pending"
+    // (the cancelable-syscall CANCELATION_POINT macro then aborts with -EINTR),
+    // any other value == "not canceled, proceed". The bogus -38 leaves the guest
+    // libsystem_kernel cancellation machinery in an indeterminate state so
+    // launchd's kqueue_demand_loop discards its ready select()/kevent result and
+    // re-loops instead of advancing to handle_kqueue() — the accepted job-submit
+    // connection is harvested by kevent() but never read(). Rewrite the code to
+    // the canonical "not canceled" sentinel so the demand loop proceeds.
+    // BW64_FIXCANCEL overrides the value (default -22 == -EINVAL, darlingserver's
+    // negated-errno convention); set it to test 0 / 22 / -22 without rebuilding.
+    if (getenv("BW64_FIXCANCEL") && (S32)rc == 8 && fd >= 0x2000 &&
+        m32->readd(dataAddr + 0) == 31u) {
+        const char* v = getenv("BW64_FIXCANCEL");
+        S32 newCode = (v && v[0] && !(v[0] == '1' && v[1] == 0)) ? (S32)atoi(v) : -22;
+        S32 oldCode = (S32)m32->readd(dataAddr + 4);
+        m32->writed(dataAddr + 4, (U32)newCode);
+        if (getenv("BW64_IPCDUMP"))
+            klog_fmt("FIXCANCEL pid=%d tid=%d fd=0x%llx code %d -> %d",
+                     (int)thread->process->id, (int)thread->id,
+                     (unsigned long long)fd, (int)oldCode, (int)newCode);
+    }
     if (wsReadEnabled() && (S32)rc >= 0) {
         // 'M' record: the wineserver request-reply / fd-pass channel (the select
         // + get_apc_result loop the crash trace runs). hdr = first 16 bytes of
