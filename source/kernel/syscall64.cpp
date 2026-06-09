@@ -2881,6 +2881,26 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // a cancel-pending helper thread actually exit (see the note above sys_sendmsg64).
     // dserver_rpc_callhdr_t = {u32 number@0; s32 pid@4; s32 tid@8; u32 arch@12};
     // the call args start at +16, so action is at dataAddr+16.
+    // BW64_CHECKIN (S34): dump the dserver_rpc_callhdr_t {u32 number@0; s32 pid@4;
+    // s32 tid@8; u32 arch@12} for a checkin (#1) / checkout (#2). The akwin GUI wedge
+    // is a darlingserver "Received call from non-existent thread?" on a NEW helper's
+    // checkin (TID57): darlingserver received the 40-byte checkin but rejected it at
+    // the thread-lookup stage instead of registering the thread. The suspect is the
+    // header's `tid` field — if a freshly-created guest thread sends a checkin with a
+    // stale/wrong tid (or pid), darlingserver looks up the wrong/absent thread and
+    // errors. Comparing a SUCCESSFUL checkin (TID54/55/56) against the FAILING one
+    // (TID57) header field-by-field pins whether the emulator hands the new thread the
+    // right identity. Gated; dserver-socket fd heuristic.
+    if (getenv("BW64_CHECKIN") && total >= 16 && fd >= 0x2000 && cpu->thread) {
+        U32 cn0 = m32->readd(dataAddr + 0);
+        if (cn0 == 1u || cn0 == 2u) {
+            klog_fmt("CHECKIN pid=%d guestTid=%d %s hdr{num=%u pid=%d tid=%d arch=0x%x} fd=0x%llx len=%u",
+                     (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                     (int)cpu->thread->id, cn0 == 1u ? "CHECKIN" : "CHECKOUT",
+                     (unsigned)cn0, (int)m32->readd(dataAddr + 4), (int)m32->readd(dataAddr + 8),
+                     (unsigned)m32->readd(dataAddr + 12), (unsigned long long)fd, (unsigned)total);
+        }
+    }
     if (cancelExitEnabled() && total >= 16 && fd >= 0x2000 && cpu->thread &&
         cancelExitAppliesTo(cpu->thread->process)) {
         U32 cn = m32->readd(dataAddr + 0);
