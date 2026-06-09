@@ -285,6 +285,18 @@ if [ -d "$PREFIX" ]; then
         cp -R "$CGFW/Versions/C/Resources/Backends" "$CGFW/Backends"
         echo "--- S29: mirrored CoreGraphics.framework/Backends to the framework root ---"
     fi
+    # S31: AppKit owns the REAL window backend (X11Display/X11Window -> XCreateWindow/
+    # XMapWindow); CoreGraphics X11.backend only does screen/input (its newWindow: is a
+    # no-op stub — see tools/darwin-cg-probe/cgwin.c). +[NSDisplay currentDisplay] opens
+    # <AppKit.framework>/Backends, which (like CoreGraphics) is staged only under
+    # Versions/C/Resources/Backends with no Resources/Current symlink. Mirror it to the
+    # framework root as a REAL dir so AppKit can load X11Display. (akwin.c reaches NSWindow
+    # alloc with this in place.)
+    AKFW="$STAGE$PREFIX/System/Library/Frameworks/AppKit.framework"
+    if [ -d "$AKFW/Versions/C/Resources/Backends" ] && [ ! -e "$AKFW/Backends" ]; then
+        cp -R "$AKFW/Versions/C/Resources/Backends" "$AKFW/Backends"
+        echo "--- S31: mirrored AppKit.framework/Backends to the framework root ---"
+    fi
 else
     echo "WARNING: DARLING_PREFIX $PREFIX is not a directory; overlay will be thin." >&2
 fi
@@ -300,6 +312,28 @@ mkdir -p "$STAGE/etc"
 printf "root:x:0:0:root:/root:/bin/bash\nusername:x:1000:1000:username:/home/username:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n" > "$STAGE/etc/passwd"
 printf "root:x:0:\nusername:x:1000:\nnogroup:x:65534:\n" > "$STAGE/etc/group"
 printf "passwd: files\ngroup: files\nhosts: files dns\n" > "$STAGE/etc/nsswitch.conf"
+
+# S31: fontconfig config + a font at the BARE Linux paths. AppKit window init pulls in
+# the native libfontconfig.so.1 (a Linux .so via elfcalls), which resolves BARE Linux
+# paths (/etc/fonts/fonts.conf, /usr/share/fonts), NOT the vchroot-prefixed Darwin ones.
+# With no config it errors "Cannot load default config file: (null)" and AppKit wedges
+# in initWithContentRect:. Provide a minimal config + at least one TTF so fontconfig
+# scans a real dir. (These go in $STAGE/etc + $STAGE/usr/share, zipped into the base +
+# darling zips.) The TTF is reused from the Ruby rdoc fonts already in the tree.
+mkdir -p "$STAGE/etc/fonts/conf.d" "$STAGE/usr/share/fonts" "$STAGE/var/cache/fontconfig"
+cat > "$STAGE/etc/fonts/fonts.conf" <<'FCEOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>/usr/share/fonts</dir>
+  <cachedir>/var/cache/fontconfig</cachedir>
+  <include ignore_missing="yes">/etc/fonts/conf.d</include>
+</fontconfig>
+FCEOF
+# Seed one font (the rdoc Lato is shipped in the Darling tree under usr/lib/ruby/...).
+_FCFONT="$STAGE$PREFIX/usr/lib/ruby/2.6.0/rdoc/generator/template/darkfish/fonts/Lato-Regular.ttf"
+[ -f "$_FCFONT" ] && cp "$_FCFONT" "$STAGE/usr/share/fonts/Lato-Regular.ttf" || true
+echo "--- S31: staged bare /etc/fonts/fonts.conf + /usr/share/fonts (fontconfig) ---"
 
 echo "--- staged tree ready ---"
 du -sh "$STAGE" || true
@@ -344,6 +378,27 @@ if [ -f "$CGPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
         fi
     else
         echo "WARNING: cgprobe cross-build failed; CG GUI probe not staged." >&2
+    fi
+    # S30: cgwin — CGSNewRegionWithRect/CGSNewWindow/CGSOrderWindow. Proves CoreGraphics'
+    # X11.backend newWindow: is a NO-OP stub (CGSNewWindow returns err 1001) — the CGS
+    # window path is a DEAD END; windows live in AppKit. Kept as a regression/record.
+    if [ -f "$CGPROBE_SRC/build-cgwin.sh" ] && bash "$CGPROBE_SRC/build-cgwin.sh" >/dev/null 2>&1 && [ -f "$CGPROBE_SRC/cgwin" ]; then
+        DPFX="$STAGEHOST/dist/stage/usr/libexec/darling"
+        if [ -d "$DPFX/usr/bin" ]; then
+            cp "$CGPROBE_SRC/cgwin" "$DPFX/usr/bin/cgwin"; chmod 755 "$DPFX/usr/bin/cgwin"
+            echo "--- S30: staged cgwin (CGSNewWindow dead-end probe) at usr/bin/cgwin ---"
+        fi
+    fi
+    # S31: akwin — the AppKit NSWindow probe ([NSApplication sharedApplication] -> NSWindow
+    # initWithContentRect: -> makeKeyAndOrderFront:). The REAL window path: X11Display ->
+    # X11Window -> XCreateWindow/XMapWindow. Currently wedges on a /proc/self/mountinfo
+    # re-read loop wrapped in pthread_canceled (S31/S32 frontier). Run DSERVER_INIT=/usr/bin/akwin.
+    if [ -f "$CGPROBE_SRC/build-akwin.sh" ] && bash "$CGPROBE_SRC/build-akwin.sh" >/dev/null 2>&1 && [ -f "$CGPROBE_SRC/akwin" ]; then
+        DPFX="$STAGEHOST/dist/stage/usr/libexec/darling"
+        if [ -d "$DPFX/usr/bin" ]; then
+            cp "$CGPROBE_SRC/akwin" "$DPFX/usr/bin/akwin"; chmod 755 "$DPFX/usr/bin/akwin"
+            echo "--- S31: staged akwin (AppKit NSWindow probe) at usr/bin/akwin ---"
+        fi
     fi
 fi
 
