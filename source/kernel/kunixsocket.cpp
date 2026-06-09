@@ -25,8 +25,11 @@
 
 #include <string>
 #include <unordered_map>
+#include <thread>
+#include <chrono>
 #include "../x11wire/xwireserver.h"
 #include "../x11wire/xwireconnection.h"
+#include "../shellspawn/shellspawnclient.h"
 #ifdef BOXEDWINE_DARWIN
 #include "darwin/dyldsym.h"
 #endif
@@ -686,6 +689,14 @@ U32 KUnixSocketObject::bind(KThread* thread, const KFileDescriptorPtr& fd, U32 a
         std::shared_ptr<KUnixSocketObject> s = std::dynamic_pointer_cast<KUnixSocketObject>(fd->kobject);
         socketNode->kobject = fd->kobject;
         s->node = socketNode;
+        // S27: when the shellspawn daemon binds its listening control socket,
+        // kick off the in-emulator client (gated on BW64_SHELLSPAWN; a no-op
+        // otherwise). The socket isn't listening() yet — onShellspawnBound
+        // spawns a detached worker that waits for listen() before connecting, so
+        // the binding guest thread is never blocked.
+        if (this->type == K_SOCK_STREAM && ShellSpawnClient::isShellspawnSockPath(fullpath.c_str())) {
+            ShellSpawnClient::instance().onShellspawnBound(s);
+        }
         // DGRAM delivery resolves a destination by address via the registry (a
         // pathname dgram socket has a VFS node too, but autobind ones don't, so a
         // uniform registry covers both). Record the bound path for reply routing.
@@ -928,6 +939,113 @@ U32 KUnixSocketObject::accept(KThread* thread, const KFileDescriptorPtr& fd, U32
                  (int)thread->process->id, (int)thread->id, (int)result->handle);
     }
     return result->handle;
+}
+
+// --- In-emulator AF_UNIX STREAM client (S27 shellspawn driver) ----------------
+// These run on a detached HOST worker thread (not a guest KThread), so they must
+// not use the guest-thread BOXEDWINE_CONDITION_WAIT macro (it `return`s and
+// assumes the cooperative scheduler). Instead they take the condition's plain
+// std::mutex directly and poll/signal, which is correct in both the single- and
+// multi-threaded builds.
+
+std::shared_ptr<KUnixSocketObject> KUnixSocketObject::hostConnectStream() {
+    // `this` is the guest's LISTENING socket. Build a fresh client endpoint and
+    // queue it onto pendingConnections exactly as KUnixSocketObject::connect's
+    // queue branch does, then let the guest's own accept() do the pairing.
+    auto client = std::make_shared<KUnixSocketObject>(this->domain, this->type, this->protocol);
+
+    // Wait until the daemon has actually listen()'d before queueing (bind fires
+    // our hook, but listen() runs slightly later). Bounded poll so we never wedge.
+    for (int i = 0; i < 2000 && !this->listening; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (!this->listening) {
+        return nullptr;
+    }
+
+    {
+        std::unique_lock<std::mutex> lk(this->lockCond->m);
+        this->pendingConnections.push_back(client);
+        this->readSeq++; // S23: a queued connection is a fresh POLLIN edge on the
+                         // listening fd — wake the accept()/epoll waiter.
+    }
+    this->lockCond->signalAll();
+
+    // accept() sets client->connection (the server-side accepted peer) and
+    // client->connected. Poll until paired (or give up).
+    for (int i = 0; i < 4000 && client->connection.expired(); i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if (client->connection.expired()) {
+        return nullptr;
+    }
+    client->connected = true;
+    client->blocking = true;
+    return client;
+}
+
+// Frame a single fd-less iovec the way sendmsg() does: [u32 len LE][len bytes],
+// pushed onto the connected peer's msgs queue. `this` is the client endpoint;
+// con = this->connection is the server-side accepted peer whose recvmsg()/read()
+// will consume the frame.
+void KUnixSocketObject::hostSendBytes(const U8* data, U32 len) {
+    std::shared_ptr<KUnixSocketObject> con = this->connection.lock();
+    if (!con) {
+        return;
+    }
+    auto msg = std::make_shared<KSocketMsg>();
+    msg->data.push_back((U8)len);
+    msg->data.push_back((U8)(len >> 8));
+    msg->data.push_back((U8)(len >> 16));
+    msg->data.push_back((U8)(len >> 24));
+    msg->data.insert(msg->data.end(), data, data + len);
+    {
+        std::unique_lock<std::mutex> lk(con->lockCond->m);
+        con->msgs.push(msg);
+        con->readSeq++;
+    }
+    con->lockCond->signalAll();
+}
+
+void KUnixSocketObject::hostSendMsgWithObjects(const U8* data, U32 len, const std::vector<KSocketMsgObject>& objects) {
+    std::shared_ptr<KUnixSocketObject> con = this->connection.lock();
+    if (!con) {
+        return;
+    }
+    auto msg = std::make_shared<KSocketMsg>();
+    msg->objects = objects;
+    msg->data.push_back((U8)len);
+    msg->data.push_back((U8)(len >> 8));
+    msg->data.push_back((U8)(len >> 16));
+    msg->data.push_back((U8)(len >> 24));
+    msg->data.insert(msg->data.end(), data, data + len);
+    {
+        std::unique_lock<std::mutex> lk(con->lockCond->m);
+        con->msgs.push(msg);
+        con->readSeq++;
+    }
+    con->lockCond->signalAll();
+}
+
+void KUnixSocketObject::makeHostPipe(std::shared_ptr<KUnixSocketObject>& readEnd, std::shared_ptr<KUnixSocketObject>& writeEnd) {
+    readEnd  = std::make_shared<KUnixSocketObject>(K_AF_UNIX, K_SOCK_STREAM, 0);
+    writeEnd = std::make_shared<KUnixSocketObject>(K_AF_UNIX, K_SOCK_STREAM, 0);
+    // writeEnd's peer is readEnd: a write to writeEnd (the guest's stdout fd) puts
+    // bytes into readEnd->recvBuffer (internal_write/writeNative deliver to
+    // con = this->connection). The host worker drains readEnd via readNative.
+    writeEnd->connection = readEnd;
+    readEnd->connection = writeEnd;
+    writeEnd->connected = true;
+    readEnd->connected = true;
+    readEnd->blocking = true;
+}
+
+void KUnixSocketObject::hostCloseForEof() {
+    {
+        std::unique_lock<std::mutex> lk(this->lockCond->m);
+        this->inClosed = true;
+    }
+    this->lockCond->signalAll();
 }
 
 U32 KUnixSocketObject::getsockname(KThread* thread, const KFileDescriptorPtr& fd, U32 address, U32 plen) {
@@ -1434,25 +1552,20 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
     // wedging launchd's job-submit read. The recvBuffer branch delivers a frame
     // correctly across multiple iovecs and leaves the remainder for the next read.
     drainStreamMsgsToRecvBuffer();
-    while (!this->msgs.size()) {
-        if (this->recvBuffer.size_used()) {
-            readMsgHdr(thread, address, &hdr);
-            for (U32 i = 0; i < hdr.msg_iovlen; i++) {
-                U32 p = memory->readd(hdr.msg_iov + 8 * i);
-                U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
-
-                U32 count = std::min(len, (U32)this->recvBuffer.size_used());
-                memory->performOnMemory(p, count, false, [this](U8* ram, U32 len) {
-                    this->recvBuffer.get(ram, len);
-                    return true;
-                    });
-                result += count;
-            }
-            if (this->type==K_SOCK_STREAM)
-                memory->writed(address + 4, 0); // msg_namelen, set to 0 for connected sockets
-            memory->writed(address + 20, 0); // msg_controllen
-            return result;
-        }
+    // STREAM byte-stream ordering: drainStreamMsgsToRecvBuffer() flattens every
+    // fd-less frame that precedes the first object-bearing frame into recvBuffer
+    // and STOPS there. So any bytes now in recvBuffer are strictly EARLIER in the
+    // stream than a leftover object-frame in msgs — deliver them FIRST, even when
+    // msgs is non-empty. Without this, a recvmsg with an object-frame queued (e.g.
+    // shellspawn's GO carrying the 3 stdio fds) jumped straight to the framed-msgs
+    // path below and delivered GO ahead of the SETEXEC/ADDARG bytes still sitting
+    // in recvBuffer, so the server ran its default /bin/bash instead of the
+    // requested binary. (The previous guard only delivered recvBuffer when msgs
+    // was empty, which was wrong whenever an object-frame trailed plain bytes.)
+    // Wait until there's either buffered stream bytes or a queued frame. Re-drain
+    // on each wake so bytes that arrive as fd-less frames (which land in msgs then
+    // get flattened) are noticed even though msgs goes back to empty.
+    while (!this->recvBuffer.size_used() && !this->msgs.size()) {
         if (this->inClosed) {
             return 0;
         }
@@ -1470,6 +1583,26 @@ U32 KUnixSocketObject::recvmsg(KThread* thread, const KFileDescriptorPtr& fd, U3
             return -K_CONTINUE;
         }
 #endif
+        drainStreamMsgsToRecvBuffer();
+    }
+    // Buffered stream bytes precede any leftover object-frame — deliver them first.
+    if (this->recvBuffer.size_used()) {
+        readMsgHdr(thread, address, &hdr);
+        for (U32 i = 0; i < hdr.msg_iovlen; i++) {
+            U32 p = memory->readd(hdr.msg_iov + 8 * i);
+            U32 len = memory->readd(hdr.msg_iov + 8 * i + 4);
+
+            U32 count = std::min(len, (U32)this->recvBuffer.size_used());
+            memory->performOnMemory(p, count, false, [this](U8* ram, U32 len) {
+                this->recvBuffer.get(ram, len);
+                return true;
+                });
+            result += count;
+        }
+        if (this->type==K_SOCK_STREAM)
+            memory->writed(address + 4, 0); // msg_namelen, set to 0 for connected sockets
+        memory->writed(address + 20, 0); // msg_controllen
+        return result;
     }
 
     readMsgHdr(thread, address, &hdr);

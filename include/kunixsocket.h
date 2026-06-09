@@ -76,6 +76,39 @@ public:
 
     static U32 unixsocket_write_native_nowait(const std::shared_ptr<KObject>& obj, U8* value, int len);
 
+    // --- In-emulator AF_UNIX STREAM client (S27 shellspawn driver) -------------
+    // The shellspawn daemon binds a LISTENING AF_UNIX STREAM socket inside the
+    // guest; nothing on the host can connect to it. These let host C++ act as a
+    // client against a guest listening socket WITHOUT a guest KThread or guest
+    // memory — the inverse of the in-process X11 wire server (which is a host
+    // SERVER for a guest client). See source/shellspawn/.
+    //
+    // hostConnectStream: create a fresh client endpoint, queue it onto this
+    // listening socket's pendingConnections (+readSeq to wake the listen-fd
+    // waiter, the S23 edge) and block until the guest's accept() pairs us. Returns
+    // the client endpoint; client->connection then points at the server-side
+    // accepted peer. Returns nullptr on failure/timeout. Call on a host thread.
+    std::shared_ptr<KUnixSocketObject> hostConnectStream();
+    // hostSendBytes: enqueue a single fd-less STREAM frame (the [u32 len][bytes]
+    // shape sendmsg() writes) onto the connected peer's msgs queue so the guest's
+    // recvmsg()/read() consume it as an in-order byte stream. Caller is the client
+    // endpoint returned by hostConnectStream.
+    void hostSendBytes(const U8* data, U32 len);
+    // hostSendMsgWithObjects: like hostSendBytes but the frame carries SCM_RIGHTS
+    // objects (the GO message's 3 stdio fds), delivered by the guest's recvmsg
+    // cmsg path. Frame ordering is FIFO with hostSendBytes (same msgs queue), so a
+    // GO sent after SETEXEC/ADDARG is always seen after them.
+    void hostSendMsgWithObjects(const U8* data, U32 len, const std::vector<KSocketMsgObject>& objects);
+    // Create a connected AF_UNIX STREAM pair entirely in host C++ (no guest fds):
+    // bytes written to `writeEnd` land in `readEnd`'s recvBuffer (readNative). Used
+    // to build the shellspawn child's stdio: the writeEnd object is handed to the
+    // guest via SCM_RIGHTS; the host worker drains the readEnd.
+    static void makeHostPipe(std::shared_ptr<KUnixSocketObject>& readEnd, std::shared_ptr<KUnixSocketObject>& writeEnd);
+    // Mark this endpoint as EOF and wake any blocked readNative so a host worker
+    // draining it exits. Used to tear down the shellspawn capture pipes once the
+    // child's exit status has been read.
+    void hostCloseForEof();
+
     // --- AF_UNIX SOCK_DGRAM (connectionless) support ---------------------------
     // Datagram unix sockets aren't connected: a sender names the destination per
     // message (sendto/sendmsg msg_name) and the receiver pulls from its own msgs
