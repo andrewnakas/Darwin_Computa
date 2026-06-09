@@ -21,6 +21,7 @@
 #include <thread>   // std::this_thread::yield() for sched_yield
 #include <mutex>    // std::recursive_mutex for BW64_SERIAL_TEARDOWN
 #include <set>      // BW64_BLOCKDUMP dedup set
+#include <map>      // BW64_CANCELEXIT per-thread #31 spin counter
 #include "kunixsocket.h"
 #include "kpoll.h"
 #include "ripSampler.h"
@@ -2705,7 +2706,15 @@ static U32 msgScratch(KThread* thread) {
 // actually unwinds and exits. We deliberately do NOT touch action 1/2
 // (enable/disable) — that was why the blunt BW64_FIXCANCEL=0 (which rewrote every
 // #31 reply) regressed early boot. Env-gated; default off => byte-identical boot.
-static std::set<int> g_cancelExitPending; // guest thread ids that sent #31 action=0
+// Per-guest-thread count of CONSECUTIVE pthread_canceled(#31, action=0) queries with no
+// other dserver call in between. A normal cancellation handshake issues #31 once or twice
+// interleaved with real work; the pathological -38-stub SPIN issues thousands in a row
+// (securityd: 24k, the original akwin helper: 7800). Only once the run-length crosses
+// CANCELEXIT_SPIN_THRESHOLD do we treat the thread as genuinely wedged and rewrite its #31
+// reply to 0 (== canceled) so it _pthread_exits. This avoids force-exiting a thread that is
+// mid-handshake (which exited holding a mutex -> the S33 psynch_mutexwait cleanup deadlock).
+static std::map<int,int> g_cancelExitSpin; // guest tid -> consecutive #31 action=0 count
+static const int CANCELEXIT_SPIN_THRESHOLD = 200;
 static bool cancelExitEnabled() { static int e = getenv("BW64_CANCELEXIT") ? 1 : 0; return e != 0; }
 // CANCELEXIT MUST NOT touch launchd/daemon boot: a stale rewrite (thread-id reuse) of
 // a launchd #31 reply to 0 makes a launchd thread exit prematurely -> launchd
@@ -2872,10 +2881,18 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // a cancel-pending helper thread actually exit (see the note above sys_sendmsg64).
     // dserver_rpc_callhdr_t = {u32 number@0; s32 pid@4; s32 tid@8; u32 arch@12};
     // the call args start at +16, so action is at dataAddr+16.
-    if (cancelExitEnabled() && total >= 20 && fd >= 0x2000 && cpu->thread &&
-        cancelExitAppliesTo(cpu->thread->process) &&
-        m32->readd(dataAddr + 0) == 31u && m32->readd(dataAddr + 16) == 0u) {
-        g_cancelExitPending.insert((int)cpu->thread->id);
+    if (cancelExitEnabled() && total >= 16 && fd >= 0x2000 && cpu->thread &&
+        cancelExitAppliesTo(cpu->thread->process)) {
+        U32 cn = m32->readd(dataAddr + 0);
+        int tid = (int)cpu->thread->id;
+        if (cn == 31u && total >= 20 && m32->readd(dataAddr + 16) == 0u) {
+            // Consecutive #31 action=0 from this thread — bump its spin run-length.
+            g_cancelExitSpin[tid]++;
+        } else {
+            // Any other dserver call breaks the run: this thread is doing real work,
+            // not pure-spinning, so reset its counter (don't force-exit it).
+            g_cancelExitSpin.erase(tid);
+        }
     }
 
     // BW64_S2C: dump the wire bytes of an S2C call (server->client memory upcall).
@@ -3276,16 +3293,22 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // action 1/2) replies are untouched — avoids the FIXCANCEL=0 early-boot regress.
     if (cancelExitEnabled() && (S32)rc == 8 && fd >= 0x2000 && thread &&
         cancelExitAppliesTo(thread->process) &&
-        m32->readd(dataAddr + 0) == 31u &&
-        g_cancelExitPending.count((int)thread->id)) {
-        g_cancelExitPending.erase((int)thread->id);
-        S32 oldCode = (S32)m32->readd(dataAddr + 4);
-        if (oldCode != 0) {
-            m32->writed(dataAddr + 4, 0u);
-            if (getenv("BW64_IPCDUMP"))
-                klog_fmt("CANCELEXIT pid=%d tid=%d fd=0x%llx code %d -> 0 (thread exits)",
-                         (int)thread->process->id, (int)thread->id,
-                         (unsigned long long)fd, (int)oldCode);
+        m32->readd(dataAddr + 0) == 31u) {
+        auto it = g_cancelExitSpin.find((int)thread->id);
+        if (it != g_cancelExitSpin.end() && it->second >= CANCELEXIT_SPIN_THRESHOLD) {
+            // This thread has issued CANCELEXIT_SPIN_THRESHOLD+ consecutive #31 action=0
+            // queries with no other work = the pathological -38-stub spin. Only NOW do we
+            // answer 0 (canceled) so it _pthread_exits. A thread mid-handshake (a handful
+            // of #31 interleaved with real calls) never reaches the threshold, so we don't
+            // force it to exit while holding a lock.
+            S32 oldCode = (S32)m32->readd(dataAddr + 4);
+            if (oldCode != 0) {
+                m32->writed(dataAddr + 4, 0u);
+                if (getenv("BW64_IPCDUMP"))
+                    klog_fmt("CANCELEXIT pid=%d tid=%d fd=0x%llx code %d -> 0 after %d spins (thread exits)",
+                             (int)thread->process->id, (int)thread->id,
+                             (unsigned long long)fd, (int)oldCode, it->second);
+            }
         }
     }
     if (wsReadEnabled() && (S32)rc >= 0) {
