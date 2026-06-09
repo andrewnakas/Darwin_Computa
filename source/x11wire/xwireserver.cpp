@@ -31,11 +31,20 @@ XWireServer& XWireServer::instance() {
 bool XWireServer::isXDisplayPath(const char* path) {
     if (!path) return false;
     // libX11 unix transport: "/tmp/.X11-unix/X0", "/tmp/.X11-unix/X1", ...
-    static const char prefix[] = "/tmp/.X11-unix/X";
-    size_t pl = sizeof(prefix) - 1;
-    if (strncmp(path, prefix, pl) != 0) return false;
-    // require at least one trailing display digit
-    return path[pl] >= '0' && path[pl] <= '9';
+    // wine64 connects with the bare path, but a Darwin guest runs under the
+    // darling vchroot, so libX11 reaches connect() with the prefix-translated
+    // path "<prefix>/tmp/.X11-unix/X0" (same family as launchd's bound sock
+    // path "/usr/libexec/darling/var/tmp/launchd/sock"). Match the display
+    // segment whether it starts the path or sits after a vchroot prefix.
+    static const char seg[] = "/tmp/.X11-unix/X";
+    size_t sl = sizeof(seg) - 1;
+    const char* hit = strstr(path, seg);
+    while (hit) {
+        // require at least one trailing display digit after the segment
+        if (hit[sl] >= '0' && hit[sl] <= '9') return true;
+        hit = strstr(hit + 1, seg);
+    }
+    return false;
 }
 
 uint32_t XWireServer::allocClientIdBase() {

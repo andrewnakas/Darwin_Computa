@@ -57,3 +57,4 @@ tools/rootfs-darling/work/
 
 # Carthage build output (prebuilt frameworks)
 project/mac-xcode/Boxedwine/Carthage/Build/
+tools/darwin-x11-probe/xprobe

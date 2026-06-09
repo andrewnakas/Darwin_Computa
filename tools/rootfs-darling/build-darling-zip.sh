@@ -116,6 +116,38 @@ copy /lib/x86_64-linux-gnu/libc.so.6
 # libgcc_s is dlopen-ed lazily by glibc for pthread unwinding (ldd misses it).
 copy /lib/x86_64-linux-gnu/libgcc_s.so.1
 copy /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+
+# --- S28: Linux libX11.so.6 + closure, for the Darling X11.backend native bridge.
+# Darlings CoreGraphics/AppKit X11.backend loads usr/lib/native/libX11.dylib,
+# which is a thin Mach-O native-bridge that elfcalls-dlopens the *Linux*
+# libX11.so.6 from the standard paths (/usr/lib/x86_64-linux-gnu, /usr/lib,
+# /lib...). That real Linux libX11 then connect()s to /tmp/.X11-unix/X0, which the
+# emulators XWireServer (source/x11wire) intercepts and presents to SDL. Without
+# this .so the bridge prints "Cannot load libX11.so.6 (ELF)" and the GUI path dies.
+# Install + stage libX11 and its full .so closure (libxcb, libXau, libXdmcp, ...).
+echo "--- S28: installing + staging Linux libX11.so.6 + closure ---"
+( apt-get update -qq && apt-get install -y -qq libx11-6 >/dev/null 2>&1 ) || true
+X11SO="$(find /usr/lib /lib -name "libX11.so.6*" -type f 2>/dev/null | head -1)"
+if [ -n "$X11SO" ]; then
+    # Stage the real ELF content at the SONAME path under BOTH search roots. The
+    # guest VFS does NOT reliably follow zip symlinks for the native dlopen path
+    # (a symlink entry loads as a tiny file -> "file too short"), so we place the
+    # FULL file at libX11.so.6 (not a symlink to libX11.so.6.4.0). Same for the
+    # closure SONAMEs.
+    for base in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+        mkdir -p "$STAGE$base"
+        cp -L "$X11SO" "$STAGE$base/libX11.so.6"
+        for dep in $(ldd "$X11SO" 2>/dev/null | awk "/=>/ {print \$3}" | grep -E "^/" | sort -u); do
+            son="$(basename "$dep" | sed -E "s/(\.so\.[0-9]+)\..*/\1/")"
+            cp -L "$dep" "$STAGE$base/$son" 2>/dev/null || true
+            copy "$dep"
+        done
+    done
+    echo "--- S28: staged libX11.so.6 + closure (real files at SONAME paths) ---"
+else
+    echo "WARNING: libX11.so.6 not found/installable in image; GUI bridge will fail." >&2
+fi
+
 mkdir -p "$STAGE/etc"; : > "$STAGE/etc/ld.so.cache"
 
 # Stage mldr at the canonical guest path the launcher expects
@@ -210,6 +242,27 @@ printf "passwd: files\ngroup: files\nhosts: files dns\n" > "$STAGE/etc/nsswitch.
 echo "--- staged tree ready ---"
 du -sh "$STAGE" || true
 '
+
+# --- S28: stage the raw-Xlib GUI probe (host-built Mach-O) -------------------
+# xprobe is a minimal libX11 client (XOpenDisplay->XCreateWindow->XMapWindow)
+# used to light up the in-process X11 wire-server -> SDL bridge without the whole
+# AppKit stack. It must be a Darwin x86_64 Mach-O linked against the *staged*
+# guest dylibs, so it is cross-built on the macOS host (Apple clang) — NOT in the
+# Docker container — and injected into the stage tree here. Run via
+# DSERVER_INIT=/usr/bin/xprobe. See tools/darwin-x11-probe/.
+XPROBE_SRC="$(cd "$(dirname "$0")/.." && pwd)/darwin-x11-probe"
+if [ -f "$XPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$XPROBE_SRC/build.sh" >/dev/null 2>&1 && [ -f "$XPROBE_SRC/xprobe" ]; then
+        DPFX="$STAGEHOST/dist/stage/usr/libexec/darling"
+        if [ -d "$DPFX/usr/bin" ]; then
+            cp "$XPROBE_SRC/xprobe" "$DPFX/usr/bin/xprobe"
+            chmod 755 "$DPFX/usr/bin/xprobe"
+            echo "--- S28: staged GUI probe at usr/libexec/darling/usr/bin/xprobe ---"
+        fi
+    else
+        echo "WARNING: xprobe cross-build failed; GUI probe not staged." >&2
+    fi
+fi
 
 echo "=== zipping on host (preserves symlinks) ==="
 rm -f "$DIST/glibc-rootfs64.zip" "$DIST/darling.zip"
