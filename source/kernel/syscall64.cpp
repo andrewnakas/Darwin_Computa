@@ -3056,6 +3056,32 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
                 }
             }
         }
+        // BW64_PSYNCH (S34): decode a psynch_mutexwait / psynch_mutexdrop RPC so the
+        // WAITED-ON / DROPPED mutex address + sequence-generation is visible per thread.
+        // Built to investigate the akwin GUI wedge in -[NSWindow initWithContentRect:].
+        // FINDING (using this instrument): the mutex itself is NOT the wedge — akwin's
+        // main thread (TID49) and a helper (TID55) ping-pong the SAME mutex correctly,
+        // generations advancing 0x100 -> 0x200 -> ... (a MUTEXWAIT carries the waiter
+        // flag bits, e.g. gen 0x102, matched by the holder's MUTEXDROP at the base gen
+        // 0x100 — a normal handoff). The real wedge is a THREAD-REGISTRY failure: a
+        // cancel-heavy helper (TID55) dies "with active call? true", then a NEW helper
+        // (TID57) checks in and darlingserver logs "Received call from non-existent
+        // thread?" and never replies -> TID57's checkin hangs -> the main thread (which
+        // waits for the helper) deadlocks. Logging the mutex addr/gen was what let us
+        // RULE OUT the lost-wakeup theory and refocus on the checkin race. The dserver
+        // psynch RPC body after the 16-byte callhdr is { u64 mutex@16; u32 mgen@24;
+        // u32 ugen@28; u64 tid@32; u32 flags@40 }; mutexdrop is the same shape. The
+        // callnums (read off the DSLOG name table in live logs) are #72 = mutexdrop,
+        // #73 = mutexwait. Env-gated; default off => byte-identical behavior.
+        if (getenv("BW64_PSYNCH") && total >= 24 &&
+            (callnum == 73u /*mutexwait*/ || callnum == 72u /*mutexdrop*/)) {
+            U64 obj = ((U64)m32->readd(dataAddr + 16)) | (((U64)m32->readd(dataAddr + 20)) << 32);
+            U32 gen = total >= 28 ? m32->readd(dataAddr + 24) : 0;
+            const char* op = callnum == 73u ? "MUTEXWAIT" : "MUTEXDROP";
+            klog_fmt("PSYNCH pid=%d tid=%d %s obj=0x%llx gen=%u",
+                     (int)(cpu->thread->process ? cpu->thread->process->id : -1),
+                     (int)cpu->thread->id, op, (unsigned long long)obj, (unsigned)gen);
+        }
         if (getenv("BW64_RPCARG") && total >= 20) {
             U32 a0 = m32->readd(dataAddr + 16);
             klog_fmt("RPCSEND pid=%d tid=%d fd=0x%llx callnum=%u len=%u arg0=%d",
