@@ -1746,6 +1746,10 @@ static void readStringArray64(CPU64* cpu, U64 arrayAddr, std::vector<BString>& o
 // rebuilding memory64/cpu64 fresh — see KProcess::execve's 64-bit reset). On
 // success execve never returns to the caller (the image is replaced); it returns
 // -K_CONTINUE which the dispatcher must NOT write into RAX.
+// BW64_CANCELEXIT=<name>: the learned target guest pid (set in sys_execve64 when the
+// re-exec argv0 matches the filter; -1 until then). cancelExitAppliesTo() (below)
+// scopes the #31->0 cancel-exit rewrite to ONLY this pid so launchd/daemons are safe.
+static int g_cancelExitPid = -1;
 static U64 sys_execve64(CPU64* cpu, U64 pathAddr, U64 argvAddr, U64 envpAddr) {
     if (!cpu->thread || !cpu->thread->process) return (U64)-K_ENOSYS;
     if (!pathAddr) return (U64)-K_EFAULT;
@@ -1762,6 +1766,19 @@ static U64 sys_execve64(CPU64* cpu, U64 pathAddr, U64 argvAddr, U64 envpAddr) {
              (int)(cpu->thread && cpu->thread->process ? cpu->thread->process->id : -1),
              path.c_str(),
              args.empty() ? "" : args[0].c_str(), (int)args.size(), (int)envs.size());
+    // BW64_CANCELEXIT=<name>: learn the target app's guest pid. The Darwin re-exec
+    // argv0 is 'mldr!/usr/.../<app>', so match the filter against argv0 (and path).
+    // Records the pid so cancelExitAppliesTo() scopes the #31->0 rewrite to ONLY this
+    // process — never launchd/daemons (whose premature thread-exit stalls the boot).
+    if (const char* cef = getenv("BW64_CANCELEXIT")) {
+        if (cef[0] && !(cef[0] == '1' && cef[1] == 0) && cpu->thread && cpu->thread->process) {
+            if ((!args.empty() && args[0].contains(cef)) || path.contains(cef)) {
+                g_cancelExitPid = (int)cpu->thread->process->id;
+                klog_fmt("CANCELEXIT: learned target pid=%d (argv0 matched '%s')",
+                         g_cancelExitPid, cef);
+            }
+        }
+    }
     // Full argv dump — invaluable for telling which wine subprocess (wineboot/
     // services.exe/rpcss/plugplay/explorer) is being launched in the re-exec
     // chain; the bare argv0 ('/usr/lib/wine/wine64') is identical for all of them.
@@ -2654,6 +2671,44 @@ static U32 msgScratch(KThread* thread) {
 //   iovec  {base(0); len(4)}
 //   cmsghdr{len(0); level(4); type(8); data(12)}  -- 16-byte stride in the object code
 
+// BW64_CANCELEXIT (S32): the GUI/AppKit wedge fix. darlingserver's
+// PthreadCanceled::processCall() is a TODO stub replying code=-38 (ENOSYS) for
+// the pthread_canceled (#31) RPC. A thread that libsystem_pthread has marked
+// cancel-pending calls __pthread_canceled(action=0) from __pthread_exit_if_canceled
+// and EXITS its thread iff the reply is 0 (== "you are canceled"); ANY other value
+// (incl the bogus -38) makes it NOT exit and re-loop forever. AppKit's
+// initWithContentRect: spawns a helper (a libdispatch/CFRunLoop X11-event-source
+// worker) and cancels it; with the -38 stub the helper never exits, so a thread
+// busy-spins on #31 (observed: one thread, 7800+ #31 calls, nothing else) and the
+// main thread's join/teardown never completes -> the window is never mapped.
+// FIX: the guest only issues __pthread_canceled(action=0) AFTER it has locally
+// confirmed (flags & CANCEL_PENDING|ENABLE) that a cancel is pending — so every
+// action-0 query is from a genuinely-cancel-pending thread and the correct XNU
+// answer is 0. We record (per guest thread id) when a #31 send carries action==0,
+// then rewrite that thread's next #31 reply code to 0 so the cancelled helper
+// actually unwinds and exits. We deliberately do NOT touch action 1/2
+// (enable/disable) — that was why the blunt BW64_FIXCANCEL=0 (which rewrote every
+// #31 reply) regressed early boot. Env-gated; default off => byte-identical boot.
+static std::set<int> g_cancelExitPending; // guest thread ids that sent #31 action=0
+static bool cancelExitEnabled() { static int e = getenv("BW64_CANCELEXIT") ? 1 : 0; return e != 0; }
+// CANCELEXIT MUST NOT touch launchd/daemon boot: a stale rewrite (thread-id reuse) of
+// a launchd #31 reply to 0 makes a launchd thread exit prematurely -> launchd
+// exit_group right after exec -> the dtape 'mutex without an active thread' boot stall.
+// So scope it to the target process only. BW64_CANCELEXIT=<name> limits the fix to
+// processes whose exe path contains <name> (e.g. =akwin). BW64_CANCELEXIT=1 (legacy)
+// applies globally (UNSAFE during launchd boot — diagnostic only). Empty/"1" => global.
+// Every Darwin guest process reports exe='.../mldr' (it runs via mldr), so a name
+// filter can't pick out the target app. Instead sys_execve64 learns the target's
+// guest pid (g_cancelExitPid, defined above sys_execve64): when a re-exec's argv0 is
+// 'mldr!<path-containing-the-filter>' it records that pid, and CANCELEXIT applies
+// only to that pid.
+template <typename P> static bool cancelExitAppliesTo(const P& p) {
+    if (!p) return false;
+    static const char* filt = getenv("BW64_CANCELEXIT");
+    if (!filt || !filt[0] || (filt[0] == '1' && filt[1] == 0)) return true; // global (legacy)
+    return g_cancelExitPid >= 0 && (int)p->id == g_cancelExitPid;
+}
+
 // sendmsg(fd, msghdr*, flags) for a 64-bit guest. Gathers the scatter buffers
 // into one scratch blob, translates any SCM_RIGHTS cmsg, builds a 32-bit msghdr
 // in scratch, and calls the 32-bit ksendmsg (reusing all the AF_UNIX queue +
@@ -2796,6 +2851,17 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
         }
     }
 
+    // BW64_CANCELEXIT (S32): record a pthread_canceled (#31) query (action==0) so
+    // the matching reply on this thread can be rewritten to 0 (== canceled), letting
+    // a cancel-pending helper thread actually exit (see the note above sys_sendmsg64).
+    // dserver_rpc_callhdr_t = {u32 number@0; s32 pid@4; s32 tid@8; u32 arch@12};
+    // the call args start at +16, so action is at dataAddr+16.
+    if (cancelExitEnabled() && total >= 20 && fd >= 0x2000 && cpu->thread &&
+        cancelExitAppliesTo(cpu->thread->process) &&
+        m32->readd(dataAddr + 0) == 31u && m32->readd(dataAddr + 16) == 0u) {
+        g_cancelExitPending.insert((int)cpu->thread->id);
+    }
+
     // BW64_S2C: dump the wire bytes of an S2C call (server->client memory upcall).
     // call_number == 0x52cca11 (dserver_callnum_s2c). darlingserver, to deliver a
     // Mach msg carrying OUT-OF-LINE memory, sends this on the RECEIVER's RPC
@@ -2867,6 +2933,23 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
                      (int)cpu->thread->id, option,
                      (option & 0x1) ? "SEND" : "", (option & 0x2) ? "|RCV" : "",
                      sendSize, rcvName, bits, sz, remote, local, (int)msgid);
+            // S32: a bootstrap_look_up2 (msgh_id 0x194=404) carries the looked-up
+            // SERVICE NAME inline. _vproc_mig_look_up2 mig_strncpy's the name to
+            // request offset +0x20 (after the 0x18-byte header+NDR), max 128 bytes.
+            // When remote=0x0 (bootstrap port null) the send fails MACH_SEND_INVALID_DEST
+            // and the lookup spins forever — dumping the name pins WHICH service AppKit
+            // needs (the S32 GUI wedge during -[NSWindow initWithContentRect:]).
+            if (msgPtr && cpu->memory && (option & 0x1) && msgid == 0x194) {
+                char svc[129]; int n = 0;
+                for (; n < 128; n++) {
+                    U8 c = cpu->memory->readb(msgPtr + 0x20 + n);
+                    if (c < 0x20 || c >= 0x7f) break;
+                    svc[n] = (char)c;
+                }
+                svc[n] = 0;
+                klog_fmt("MACHMSG   look_up2 service='%s' remote=0x%x%s",
+                         svc, remote, remote == 0 ? " (NULL bootstrap port -> INVALID_DEST)" : "");
+            }
             // BW64_MACHBODY (S20): dump the mach message BODY past the 24-byte
             // mach_msg_header_t. For a COMPLEX message (bits&0x80000000) the body
             // is mach_msg_body_t{u32 descriptor_count} + N descriptors; an OOL
@@ -3167,6 +3250,27 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
             klog_fmt("FIXCANCEL pid=%d tid=%d fd=0x%llx code %d -> %d",
                      (int)thread->process->id, (int)thread->id,
                      (unsigned long long)fd, (int)oldCode, (int)newCode);
+    }
+    // BW64_CANCELEXIT (S32): rewrite the pthread_canceled (#31) reply to 0 for a
+    // thread that issued an action==0 query (recorded on the send side). 0 ==
+    // "canceled" so __pthread_exit_if_canceled actually calls _pthread_exit and the
+    // cancelled helper thread unwinds — breaking the AppKit initWithContentRect:
+    // spin (darlingserver's stub otherwise replies -38 => the thread never exits).
+    // Action-aware (only action-0 queries are tracked), so enable/disable (#31
+    // action 1/2) replies are untouched — avoids the FIXCANCEL=0 early-boot regress.
+    if (cancelExitEnabled() && (S32)rc == 8 && fd >= 0x2000 && thread &&
+        cancelExitAppliesTo(thread->process) &&
+        m32->readd(dataAddr + 0) == 31u &&
+        g_cancelExitPending.count((int)thread->id)) {
+        g_cancelExitPending.erase((int)thread->id);
+        S32 oldCode = (S32)m32->readd(dataAddr + 4);
+        if (oldCode != 0) {
+            m32->writed(dataAddr + 4, 0u);
+            if (getenv("BW64_IPCDUMP"))
+                klog_fmt("CANCELEXIT pid=%d tid=%d fd=0x%llx code %d -> 0 (thread exits)",
+                         (int)thread->process->id, (int)thread->id,
+                         (unsigned long long)fd, (int)oldCode);
+        }
     }
     if (wsReadEnabled() && (S32)rc >= 0) {
         // 'M' record: the wineserver request-reply / fd-pass channel (the select
