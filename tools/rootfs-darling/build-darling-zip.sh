@@ -148,6 +148,55 @@ else
     echo "WARNING: libX11.so.6 not found/installable in image; GUI bridge will fail." >&2
 fi
 
+# --- S29: the CoreGraphics GUI native-lib closure ----------------------------
+# Bringing up the REAL Darwin GUI stack (CoreGraphics' X11.backend, exercised by
+# tools/darwin-cg-probe/cgprobe) pulls a much larger native-bridge closure than
+# the bare libX11 of S28. Each usr/lib/native/lib*.dylib bridge elfcalls-dlopens
+# a Linux .so.N; if any is missing the bridge prints "Cannot load <lib>.so.N
+# (ELF)" and the guest aborts (f4=hlt). The set below is what cgprobe needed to
+# reach a live CGS connection (CGSMainConnectionID()=1, 1024x768 display):
+#   font/text : libfreetype.so.6 libfontconfig.so.1 (+ libpng16 libz libbrotli* libexpat)
+#   imaging   : libjpeg.so.8 libtiff.so.6 libgif.so.7 (+ tiff closure: libdeflate
+#               liblzma libwebp libzstd libjbig libLerc libsharpyuv)
+#   GL/EGL    : libGL.so.1 libGLU.so.1 libEGL.so.1 (+ libGLdispatch libGLX libOpenGL)
+#   X exts    : libXext.so.6 libXrender.so.1 libXfixes.so.3 libXcursor.so.1
+#               libXrandr.so.2 libxkbfile.so.1
+# Install the Debian packages providing them, then stage every resulting .so at
+# its SONAME path under BOTH lib roots (same real-file-not-symlink rule as S28).
+echo "--- S29: installing + staging the CoreGraphics GUI native-lib closure ---"
+( apt-get update -qq && apt-get install -y -qq \
+    libfreetype6 libfontconfig1 libpng16-16 zlib1g libbrotli1 libexpat1 \
+    libjpeg62-turbo libtiff6 libgif7 libdeflate0 liblzma5 libwebp7 libzstd1 \
+    libjbig0 liblerc4 \
+    libgl1 libglu1-mesa libegl1 \
+    libxext6 libxrender1 libxfixes3 libxcursor1 libxrandr2 libxkbfile1 \
+    >/dev/null 2>&1 ) || true
+# The literal SONAMEs the native bridges dlopen (note libjpeg.so.8 — the bridge
+# asks for .so.8 even though libjpeg62-turbo ships .so.62; stage the .so.62 ELF
+# AT the .so.8 name, ABI-compatible for the symbol subset the bridge calls).
+S29_SONAMES="libfreetype.so.6 libfontconfig.so.1 libpng16.so.16 libz.so.1 \
+  libbrotlidec.so.1 libbrotlicommon.so.1 libexpat.so.1 \
+  libjpeg.so.8 libtiff.so.6 libgif.so.7 libdeflate.so.0 liblzma.so.5 \
+  libwebp.so.7 libzstd.so.1 libjbig.so.0 libLerc.so.4 libsharpyuv.so.0 \
+  libGL.so.1 libGLU.so.1 libEGL.so.1 libGLdispatch.so.0 libGLX.so.0 libOpenGL.so.0 \
+  libXext.so.6 libXrender.so.1 libXfixes.so.3 libXcursor.so.1 libXrandr.so.2 libxkbfile.so.1"
+for base in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+    mkdir -p "$STAGE$base"
+    for son in $S29_SONAMES; do
+        # libjpeg.so.8 lives on disk as libjpeg.so.62.*; map it explicitly.
+        case "$son" in
+            libjpeg.so.8) pat="libjpeg.so.62*" ;;
+            *) pat="${son}*" ;;
+        esac
+        real="$(find /usr/lib /lib -name "$pat" -type f 2>/dev/null | head -1)"
+        [ -n "$real" ] && cp -L "$real" "$STAGE$base/$son" 2>/dev/null || true
+    done
+done
+echo "--- S29: staged GUI native-lib closure (real files at SONAME paths) ---"
+# NOTE: the top-level CoreGraphics.framework/Backends mirror (so _CGSLoadBackend
+# finds the X11.backend) is done AFTER the Darwin prefix is staged below — see
+# the "S29: mirror CoreGraphics.framework/Backends" block further down.
+
 mkdir -p "$STAGE/etc"; : > "$STAGE/etc/ld.so.cache"
 
 # Stage mldr at the canonical guest path the launcher expects
@@ -223,6 +272,19 @@ if [ -d "$PREFIX" ]; then
     chmod 1777 "$STAGE$PREFIX/var/tmp" "$STAGE$PREFIX/private/var/tmp" 2>/dev/null || true
     # Convenience symlink for the --darwin-run CLI / DYLD_ROOT_PATH examples.
     ln -sfn "$PREFIX" "$STAGE/darling-prefix" 2>/dev/null || true
+    # S29: mirror CoreGraphics.framework/Backends to the framework root. CoreGraphics'
+    # _CGSLoadBackend resolves the framework bundle (NSBundle bundleForClass:) then
+    # opens <framework>/Backends — but X11.backend is staged under
+    # Versions/C/Resources/Backends and the framework lacks the standard
+    # Resources/Current symlinks, so open('<framework>/Backends') ENOENTs and the CGS
+    # connection never loads. Mirror it as a REAL directory (guest VFS does not
+    # reliably follow zip symlinks). This is the last wall before a live CGS session
+    # (cgprobe: CGSMainConnectionID()=1, 1024x768).
+    CGFW="$STAGE$PREFIX/System/Library/Frameworks/CoreGraphics.framework"
+    if [ -d "$CGFW/Versions/C/Resources/Backends" ] && [ ! -e "$CGFW/Backends" ]; then
+        cp -R "$CGFW/Versions/C/Resources/Backends" "$CGFW/Backends"
+        echo "--- S29: mirrored CoreGraphics.framework/Backends to the framework root ---"
+    fi
 else
     echo "WARNING: DARLING_PREFIX $PREFIX is not a directory; overlay will be thin." >&2
 fi
@@ -261,6 +323,27 @@ if [ -f "$XPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
         fi
     else
         echo "WARNING: xprobe cross-build failed; GUI probe not staged." >&2
+    fi
+fi
+
+# --- S29: stage the CoreGraphics GUI probe (host-built Mach-O) ---------------
+# cgprobe drives the REAL Darwin GUI stack one layer up from xprobe: it calls
+# CGSInitialize/CGMainDisplayID so CoreGraphics' _CGSLoadBackend loads the
+# X11.backend (whose CGSConnectionX11 calls XOpenDisplay over the same libX11
+# native bridge xprobe proved). Cross-built on the host against the staged
+# CoreGraphics + Foundation + libSystem. Run via DSERVER_INIT=/usr/bin/cgprobe.
+# See tools/darwin-cg-probe/.
+CGPROBE_SRC="$(cd "$(dirname "$0")/.." && pwd)/darwin-cg-probe"
+if [ -f "$CGPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$CGPROBE_SRC/build.sh" >/dev/null 2>&1 && [ -f "$CGPROBE_SRC/cgprobe" ]; then
+        DPFX="$STAGEHOST/dist/stage/usr/libexec/darling"
+        if [ -d "$DPFX/usr/bin" ]; then
+            cp "$CGPROBE_SRC/cgprobe" "$DPFX/usr/bin/cgprobe"
+            chmod 755 "$DPFX/usr/bin/cgprobe"
+            echo "--- S29: staged CG GUI probe at usr/libexec/darling/usr/bin/cgprobe ---"
+        fi
+    else
+        echo "WARNING: cgprobe cross-build failed; CG GUI probe not staged." >&2
     fi
 fi
 
