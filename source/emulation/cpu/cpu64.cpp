@@ -4796,6 +4796,42 @@ U32 CPU64::step() {
                 }
                 memory->writeq(m.effAddr, bits);
                 fpu.FPOP();
+            } else if (op == 0xDD && sub == 1) {
+                // DD /1 = FISTTP m64int (SSE3) — truncate toward zero
+                // regardless of CW rounding, store, pop. clang emits it for
+                // (int64)double casts when SSE3 is on; akwin's own main()
+                // hit it as an unimpl trap (S35).
+                S64 v;
+                if (fpu.isRegCached[fpu.top]) {
+                    v = (S64)fpu.regCache[fpu.top].d;
+                } else {
+                    union { U64 u; double d; } u; u.d = fpu.getF64(fpu.top);
+                    v = (S64)u.d;
+                }
+                memory->writeq(m.effAddr, (U64)v);
+                fpu.FPOP();
+            } else if (op == 0xDB && sub == 1) {
+                // DB /1 = FISTTP m32int (SSE3)
+                S32 v;
+                if (fpu.isRegCached[fpu.top]) {
+                    v = (S32)fpu.regCache[fpu.top].d;
+                } else {
+                    union { U64 u; double d; } u; u.d = fpu.getF64(fpu.top);
+                    v = (S32)u.d;
+                }
+                memory->writed(m.effAddr, (U32)v);
+                fpu.FPOP();
+            } else if (op == 0xDF && sub == 1) {
+                // DF /1 = FISTTP m16int (SSE3)
+                S16 v;
+                if (fpu.isRegCached[fpu.top]) {
+                    v = (S16)fpu.regCache[fpu.top].d;
+                } else {
+                    union { U64 u; double d; } u; u.d = fpu.getF64(fpu.top);
+                    v = (S16)u.d;
+                }
+                memory->writew(m.effAddr, (U16)v);
+                fpu.FPOP();
             } else if (op == 0xDC && sub == 0) {
                 // FADD m64fp — load operand into scratch slot 8, add to ST(0)
                 U64 bits = memory->readq(m.effAddr);

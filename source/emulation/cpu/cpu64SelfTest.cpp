@@ -4119,6 +4119,23 @@ int runX64SelfTest() {
         });
     }
 
+    // T: FISTTP m64 (SSE3) — truncates toward zero regardless of CW: -3.7 → -3
+    // (round-to-nearest would give -4, so this catches a FROUND-based impl).
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0x48, 0xB8, 0x9A, 0x99, 0x99, 0x99, 0x99, 0x99, 0x0D, 0xC0, // mov rax, -3.7
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=-3.7
+            0xDD, 0x0C, 0x24,                                           // fisttp qword [rsp] → -3
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FISTTP m64 (-3.7 trunc → -3)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0xFFFFFFFFFFFFFFFDULL; // -3
+        });
+    }
+
     // T: FNSTSW AX — after FLDZ, FXAM-style flags not set in our simplified
     // model; we just confirm that the upper 48 bits of RAX are preserved and
     // the low 16 bits get the SW value (whatever it is). Pre-load RAX with a
