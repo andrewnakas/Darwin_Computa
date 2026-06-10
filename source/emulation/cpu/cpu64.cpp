@@ -5023,13 +5023,48 @@ U32 CPU64::step() {
                 // D9 E1 = FABS — absolute value of ST(0)
                 fpu.FABS();
             } else if (op == 0xD9 && modrmByte == 0xE8) {
-                // D9 E8 = FLD1 — push +1.0
-                fpu.PREP_PUSH();
+                // D9 E8 = FLD1 — push +1.0. NB FLD1/FLDZ (and the other FLD-
+                // constant methods) call PREP_PUSH themselves; pushing here too
+                // left a garbage TAG_Valid slot under the constant (S35).
                 fpu.FLD1();
             } else if (op == 0xD9 && modrmByte == 0xEE) {
                 // D9 EE = FLDZ — push +0.0
-                fpu.PREP_PUSH();
                 fpu.FLDZ();
+            } else if (op == 0xD9 && modrmByte >= 0xE4 && modrmByte <= 0xFF &&
+                       modrmByte != 0xE6 && modrmByte != 0xE7 && modrmByte != 0xE8 && modrmByte != 0xEE) {
+                // D9 E4..FF — the x87 compare/constant/transcendental block,
+                // backed by the shared soft-FPU (common/fpu.cpp), which handles
+                // the F64-regCache/extFloat80 split and the stack pushes
+                // internally. First one hit in the wild: FPREM (D9 F8) from
+                // fmod() in AppKit's NSWindow init — the unimpl trap killed each
+                // window-init helper thread and akwin churned respawns (S35).
+                // (E6/E7 are reserved; E8/EE handled above.)
+                switch (modrmByte) {
+                    case 0xE4: fpu.FTST(nullptr); break; // FTST (CPU* only feeds GetTag, unused there)
+                    case 0xE5: fpu.FXAM(); break;
+                    case 0xE9: fpu.FLDL2T(); break;
+                    case 0xEA: fpu.FLDL2E(); break;
+                    case 0xEB: fpu.FLDPI(); break;
+                    case 0xEC: fpu.FLDLG2(); break;
+                    case 0xED: fpu.FLDLN2(); break;
+                    case 0xF0: fpu.F2XM1(); break;
+                    case 0xF1: fpu.FYL2X(); break;
+                    case 0xF2: fpu.FPTAN(); break;
+                    case 0xF3: fpu.FPATAN(); break;
+                    case 0xF4: fpu.FXTRACT(); break;
+                    case 0xF5: fpu.FPREM1(); break;
+                    case 0xF6: fpu.FDECSTP(); break;
+                    case 0xF7: fpu.FINCSTP(); break;
+                    case 0xF8: fpu.FPREM(); break;
+                    case 0xF9: fpu.FYL2XP1(); break;
+                    case 0xFA: fpu.FSQRT(); break;
+                    case 0xFB: fpu.FSINCOS(); break;
+                    case 0xFC: fpu.FRNDINT(); break;
+                    case 0xFD: fpu.FSCALE(); break;
+                    case 0xFE: fpu.FSIN(); break;
+                    case 0xFF: fpu.FCOS(); break;
+                    default: goto unhandled;
+                }
             } else if (op == 0xDF && modrmByte == 0xE0) {
                 // DF E0 = FNSTSW AX — write status word into AX, preserving
                 // the upper 48 bits of RAX (per AMD64 manual).

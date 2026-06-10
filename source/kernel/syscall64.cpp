@@ -136,6 +136,8 @@
 #define X64_SYS_getcwd            79
 #define X64_SYS_chdir             80
 #define X64_SYS_fcntl             72
+#define X64_SYS_fsync             74
+#define X64_SYS_fdatasync         75
 #define X64_SYS_pipe              22
 #define X64_SYS_pipe2             293
 #define X64_SYS_getdents64        217
@@ -3572,6 +3574,8 @@ static const char* x64SyscallName(U64 nr) {
         case 62: return "kill";
         case 63: return "uname";
         case 72: return "fcntl";
+        case 74: return "fsync";
+        case 75: return "fdatasync";
         case 79: return "getcwd";
         case 80: return "chdir";
         case 82: return "rename";
@@ -4125,6 +4129,18 @@ void ksyscall64(CPU64* cpu) {
             ret = a1;
             break;
         }
+        case X64_SYS_fsync:
+        case X64_SYS_fdatasync:
+            // fsync/fdatasync(fd). Same policy as the 32-bit kernel
+            // (syscall_fsync): validate the fd, ignore the flush — all guest
+            // writes go through our VFS, there is no dirty cache to sync.
+            // CFPreferences (akwin writing its .plist) issues #74 (S35).
+            if (cpu->thread && cpu->thread->process) {
+                ret = cpu->thread->process->getFileDescriptor((FD)a1) ? 0 : (U64)-K_EBADF;
+            } else {
+                ret = (U64)-K_ENOSYS;
+            }
+            break;
         case X64_SYS_fcntl: {
             // fcntl(fd, cmd, arg). Route to the width-agnostic KProcess::fcntrl,
             // which returns the *real* per-fd state — crucially F_GETFL must

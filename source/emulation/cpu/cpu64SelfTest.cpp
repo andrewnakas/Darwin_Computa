@@ -4062,6 +4062,63 @@ int runX64SelfTest() {
         });
     }
 
+    // T: FLD1 stack discipline — fld1;fld1;faddp must give exactly 2.0. Guards
+    // the S35 double-push bug: the dispatcher called PREP_PUSH before FLD1/FLDZ,
+    // which push internally too, leaving a garbage TAG_Valid slot at ST(1) —
+    // invisible to the single-value tests above, fatal to real x87 code.
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0xD9, 0xE8,                                                 // fld1 → st0=1
+            0xD9, 0xE8,                                                 // fld1 → st0=1, st1=1
+            0xDE, 0xC1,                                                 // faddp st1,st0 → st0=2
+            0xDD, 0x1C, 0x24,                                           // fstp [rsp]
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FLD1 x2 + FADDP (no double-push, 2.0)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0x4000000000000000ULL; // 2.0
+        });
+    }
+
+    // T: FPREM — 10.0 mod 3.0 = 1.0 (the fmod() core AppKit's NSWindow init
+    // hits; was an unimpl-opcode trap that killed the window-init thread, S35).
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40, // mov rax, 3.0
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=3
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x40, // mov rax, 10.0
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=10, st1=3
+            0xD9, 0xF8,                                                 // fprem → st0=1
+            0xDD, 0x1C, 0x24,                                           // fstp [rsp]
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FPREM (10 mod 3 = 1)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0x3FF0000000000000ULL; // 1.0
+        });
+    }
+
+    // T: FSQRT — sqrt(4.0) = 2.0 (same new D9 E4..FF dispatch block).
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40, // mov rax, 4.0
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=4
+            0xD9, 0xFA,                                                 // fsqrt → st0=2
+            0xDD, 0x1C, 0x24,                                           // fstp [rsp]
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FSQRT (sqrt(4) = 2)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0x4000000000000000ULL; // 2.0
+        });
+    }
+
     // T: FNSTSW AX — after FLDZ, FXAM-style flags not set in our simplified
     // model; we just confirm that the upper 48 bits of RAX are preserved and
     // the low 16 bits get the SW value (whatever it is). Pre-load RAX with a
