@@ -5217,12 +5217,41 @@ U32 CPU64::step() {
                 }
                 fpu.FPOP();
                 fpu.FPOP();
-            } else if ((op == 0xDB || op == 0xDA) && ((modrmByte & 0xF8) == 0xF0 || (modrmByte & 0xF8) == 0xE8)) {
+            } else if ((op == 0xDA || op == 0xDB) && (modrmByte & 0xE0) == 0xC0) {
+                // FCMOVcc ST(0), ST(i) — copy ST(i) into ST(0) when the EFLAGS
+                // condition holds (flags are materialized in rflags here).
+                //   DA C0+i FCMOVB (CF)    DB C0+i FCMOVNB (!CF)
+                //   DA C8+i FCMOVE (ZF)    DB C8+i FCMOVNE (!ZF)
+                //   DA D0+i FCMOVBE(CF|ZF) DB D0+i FCMOVNBE(!(CF|ZF))
+                //   DA D8+i FCMOVU (PF)    DB D8+i FCMOVNU (!PF)
+                // AppKit's display path hit FCMOVNB (db c2) right after
+                // makeKeyAndOrderFront: (S35).
+                bool cond;
+                switch (modrmByte & 0x18) {
+                    case 0x00: cond = (rflags & X64_CF) != 0; break;
+                    case 0x08: cond = (rflags & X64_ZF) != 0; break;
+                    case 0x10: cond = (rflags & (X64_CF | X64_ZF)) != 0; break;
+                    default:   cond = (rflags & X64_PF) != 0; break;
+                }
+                if (op == 0xDB) {
+                    cond = !cond;
+                }
+                if (cond) {
+                    U32 src = fpu.STV(i);
+                    U32 dst = fpu.STV(0);
+                    fpu.regCache[dst] = fpu.regCache[src];
+                    fpu.regs[dst] = fpu.regs[src];
+                    fpu.isRegCached[dst] = fpu.isRegCached[src];
+                    fpu.tags[dst] = TAG_Valid;
+                }
+            } else if (op == 0xDB && ((modrmByte & 0xF8) == 0xF0 || (modrmByte & 0xF8) == 0xE8)) {
                 // DB F0+i = FCOMI ST(0), ST(i) — set ZF/PF/CF in rflags.
-                // DA F0+i = FUCOMI — same impl (we don't distinguish QNaN signaling).
-                // DB E8+i = FUCOMI ST(0), ST(i). DA E8+i is reserved/invalid but
-                // we accept it for symmetry; we don't distinguish signaling vs
-                // quiet NaN here.
+                // DB E8+i = FUCOMI ST(0), ST(i) — same impl (we don't
+                // distinguish signaling vs quiet NaN here). NB this branch must
+                // NOT also accept op 0xDA: DA E8+i/F0+i are reserved EXCEPT
+                // DA E9 = FUCOMPP, which the old over-broad match swallowed —
+                // leaving its pop-twice case below unreachable and the x87
+                // stack unbalanced after every FUCOMPP.
                 // SDM table: unordered -> ZF=PF=CF=1; equal -> ZF=1, PF=CF=0;
                 // ST(0)<ST(i) -> CF=1; ST(0)>ST(i) -> all zero. Other flags
                 // (OF/SF/AF) are cleared per spec.
@@ -5238,8 +5267,8 @@ U32 CPU64::step() {
                     rflags |= X64_CF;
                 }
                 // a > b: no flags set
-            } else if (op == 0xDF && (modrmByte & 0xF8) == 0xF0) {
-                // DF F0+i = FCOMIP ST(0), ST(i) — same as FCOMI, then pop.
+            } else if (op == 0xDF && ((modrmByte & 0xF8) == 0xF0 || (modrmByte & 0xF8) == 0xE8)) {
+                // DF F0+i = FCOMIP, DF E8+i = FUCOMIP — same as FCOMI, then pop.
                 U32 si = fpu.STV(i);
                 double a = fpu.isRegCached[fpu.top] ? fpu.regCache[fpu.top].d : fpu.getF64(fpu.top);
                 double b = fpu.isRegCached[si]      ? fpu.regCache[si].d      : fpu.getF64(si);

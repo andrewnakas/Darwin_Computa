@@ -4136,6 +4136,62 @@ int runX64SelfTest() {
         });
     }
 
+    // T: FCMOVB taken — CF=1 copies ST(1) into ST(0).
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0xD9, 0xE8,                                                 // fld1 → st0=1
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // mov rax, 2.0
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=2, st1=1
+            0xF9,                                                       // stc → CF=1
+            0xDA, 0xC1,                                                 // fcmovb st0,st1 → st0=1.0
+            0xDD, 0x1C, 0x24,                                           // fstp [rsp]
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FCMOVB taken (CF=1 → ST1)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0x3FF0000000000000ULL; // 1.0
+        });
+    }
+
+    // T: FCMOVNB not taken — CF=1 means !CF is false, ST(0) unchanged.
+    {
+        std::vector<U8> code = {
+            0x48, 0x83, 0xEC, 0x08,                                     // sub rsp,8
+            0xD9, 0xE8,                                                 // fld1 → st0=1
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, // mov rax, 2.0
+            0x48, 0x89, 0x04, 0x24,                                     // mov [rsp],rax
+            0xDD, 0x04, 0x24,                                           // fld qword [rsp] → st0=2, st1=1
+            0xF9,                                                       // stc → CF=1
+            0xDB, 0xC1,                                                 // fcmovnb st0,st1 → not taken, st0=2.0
+            0xDD, 0x1C, 0x24,                                           // fstp [rsp]
+            0x48, 0x8B, 0x04, 0x24,                                     // mov rax,[rsp]
+            0x48, 0x83, 0xC4, 0x08,                                     // add rsp,8
+        };
+        runAndCheck(r, "x87 FCMOVNB not taken (CF=1 → ST0 stays)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0x4000000000000000ULL; // 2.0
+        });
+    }
+
+    // T: FUCOMPP pops twice — probe the SW TOP field. fld1;fldz leaves TOP=6;
+    // a correct FUCOMPP returns TOP to 0. The old over-broad FCOMI match
+    // swallowed DA E9 and popped nothing (TOP stayed 6), unbalancing the x87
+    // stack for the rest of the thread.
+    {
+        std::vector<U8> code = {
+            0xD9, 0xE8,                                                 // fld1
+            0xD9, 0xEE,                                                 // fldz
+            0xDA, 0xE9,                                                 // fucompp → pops both
+            0xDF, 0xE0,                                                 // fnstsw ax
+            0x25, 0x00, 0x38, 0x00, 0x00,                               // and eax, 0x3800 (TOP field)
+            0xC1, 0xE8, 0x0B,                                           // shr eax, 11
+        };
+        runAndCheck(r, "x87 FUCOMPP pops twice (TOP back to 0)", withExit(code), [](CPU64& c) {
+            return c.reg[X64_R15].u64 == 0; // TOP == 0
+        });
+    }
+
     // T: FNSTSW AX — after FLDZ, FXAM-style flags not set in our simplified
     // model; we just confirm that the upper 48 bits of RAX are preserved and
     // the low 16 bits get the SW value (whatever it is). Pre-load RAX with a
