@@ -2903,6 +2903,17 @@ static U64 sys_sendmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
                      (unsigned)m32->readd(dataAddr + 12), (unsigned long long)fd, (unsigned)total);
         }
     }
+    // BW64_RPCDUMP (S35): log EVERY dserver RPC call number a guest thread sends
+    // (and its first arg word) — decodes what a short-lived helper actually does
+    // between checkin and checkout (the post-makeKeyAndOrderFront churn). Call
+    // numbers map via darlingserver scripts/generate-rpc-wrappers.py (1=checkin,
+    // 31=pthread_canceled, 73=psynch_mutexwait, ...).
+    if (getenv("BW64_RPCDUMP") && total >= 16 && fd >= 0x2000 && cpu->thread && cpu->thread->process) {
+        klog_fmt("RPC pid=%d tid=%d call=%u len=%u arg0=0x%x",
+                 (int)cpu->thread->process->id, (int)cpu->thread->id,
+                 (unsigned)m32->readd(dataAddr + 0), (unsigned)total,
+                 (unsigned)(total >= 20 ? m32->readd(dataAddr + 16) : 0));
+    }
     if (cancelExitEnabled() && total >= 16 && fd >= 0x2000 && cpu->thread &&
         cancelExitAppliesTo(cpu->thread->process)) {
         U32 cn = m32->readd(dataAddr + 0);
@@ -3339,6 +3350,14 @@ static U64 sys_recvmsg64(CPU64* cpu, U64 fd, U64 msg64, U64 flags) {
     // spin (darlingserver's stub otherwise replies -38 => the thread never exits).
     // Action-aware (only action-0 queries are tracked), so enable/disable (#31
     // action 1/2) replies are untouched — avoids the FIXCANCEL=0 early-boot regress.
+    // BW64_RPCDUMP (S35): log every dserver RPC reply {number, code} a guest
+    // thread receives — pairs with the send-side RPC lines to show which call
+    // failed (nonzero code) right before a churned helper checks out.
+    if (getenv("BW64_RPCDUMP") && (S32)rc >= 8 && fd >= 0x2000 && thread && thread->process) {
+        klog_fmt("RPCREPLY pid=%d tid=%d num=%u code=%d rc=%d",
+                 (int)thread->process->id, (int)thread->id,
+                 (unsigned)m32->readd(dataAddr + 0), (int)(S32)m32->readd(dataAddr + 4), (int)(S32)rc);
+    }
     if (cancelExitEnabled() && (S32)rc == 8 && fd >= 0x2000 && thread &&
         cancelExitAppliesTo(thread->process) &&
         m32->readd(dataAddr + 0) == 31u) {
@@ -3685,7 +3704,13 @@ void ksyscall64(CPU64* cpu) {
         static int tracePid = tracePidEnv ? atoi(tracePidEnv) : -1;
         int myPid = (int)(cpu->thread ? cpu->thread->process->id : -1);
         int myTid = (int)(cpu->thread ? cpu->thread->id : -1);
+        // BW64_TRACETARGET (S35): like BW64_TRACEPID but keyed on the
+        // BW64_CANCELEXIT name list (execve argv0 learning) — the target app's
+        // pid varies per boot, its name doesn't. Used to see which Linux
+        // syscall keeps returning EINTR between akwin's #31 cancel-checks.
+        static int traceTarget = getenv("BW64_TRACETARGET") ? 1 : 0;
         if (getenv("BW64_SYSTRACE") || (tracePid >= 0 && myPid == tracePid) ||
+            (traceTarget && cpu->thread && cancelExitAppliesTo(cpu->thread->process)) ||
             (g_s2cTraceTid != 0 && myTid == g_s2cTraceTid)) {
             klog_fmt("SYS64 [pid=%d tid=%d] #%llu %s (a1=0x%llx a2=0x%llx a3=0x%llx) rip=0x%llx",
                      myPid, (int)(cpu->thread ? cpu->thread->id : -1),

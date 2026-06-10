@@ -1068,13 +1068,39 @@ void XWireConnection::processOneRequest(const uint8_t* req, uint32_t len) {
                 case X_GLXClientInfo:
                     // no reply expected (client->server info)
                     break;
+                case X_GLXQueryServerString: {
+                    // glXQueryServerString(screen, name) — SYNCHRONOUS: the client
+                    // blocks until the reply arrives. AppKit's display init sends
+                    // exactly one of these right after makeKeyAndOrderFront:; the
+                    // old default case logged it and replied NOTHING, so akwin's
+                    // GL probe hung forever (the S35 post-makeKey stall). Reply
+                    // per xGLXQueryServerStringReply: 32-byte header with n
+                    // (strlen+1) at offset 12, then the string padded to 4.
+                    uint32_t name = rd32(req + 8); // 1=VENDOR 2=VERSION 3=EXTENSIONS
+                    const char* s = (name == 2) ? "1.4"
+                                  : (name == 1) ? "Boxedwine"
+                                  : "";
+                    uint32_t n = (uint32_t)strlen(s) + 1;     // includes NUL
+                    uint32_t padded = (n + 3) & ~3u;
+                    std::vector<uint8_t> r(32 + padded, 0);
+                    r[0] = 1;                                  // X_Reply
+                    r[2] = (uint8_t)(sequence & 0xff);
+                    r[3] = (uint8_t)(sequence >> 8);
+                    uint32_t replyLen = padded / 4;            // extra length in 4-byte units
+                    memcpy(r.data() + 4, &replyLen, 4);
+                    memcpy(r.data() + 12, &n, 4);
+                    memcpy(r.data() + 32, s, n);
+                    writeToClient(r.data(), (int)r.size());
+                    break;
+                }
                 default: {
-                    // Any other reply-expecting GLX request: send an empty 32-byte
-                    // reply so a synchronous client doesn't hang. (Requests with no
-                    // reply will just see this as the next reply for a later seq;
-                    // winex11's direct path doesn't depend on these.)
+                    // Other GLX requests: log only. Blind stub replies would
+                    // corrupt the stream for no-reply requests (DestroyContext
+                    // et al.) — implement reply-expecting minors as the app
+                    // actually sends them (QueryServerString above was the
+                    // first).
                     if (getenv("BW64_XWIRE")) {
-                        klog_fmt("XWire: GLX minor=%d (stub-reply) seq=%d", (int)minor, (int)sequence);
+                        klog_fmt("XWire: GLX minor=%d (unhandled, NO reply) seq=%d", (int)minor, (int)sequence);
                     }
                     break;
                 }
