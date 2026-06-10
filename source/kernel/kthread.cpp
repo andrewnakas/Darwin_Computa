@@ -90,9 +90,24 @@ void KThread::internalCleanup() {
         this->waitingCond = nullptr;
     }
 #endif    
-    this->clearFutexes();    
+    this->clearFutexes();
     this->exitRobustList();
     this->robustList = 0;
+    // S35: retire this thread's /proc/<pid>/task/<tid>/ dir. Linux removes a
+    // task's procfs entry when the task exits; we never did, so every dead
+    // thread left a ghost dir behind. darlingserver's Thread constructor scans
+    // the task dir to identify a checking-in thread, and a ghost entry breaks
+    // its "exactly one unregistered task" fallback ("Received call from
+    // non-existent thread?" — the akwin S34 wedge). internalCleanup runs from
+    // both cleanup() and the dtor; the null-out makes the removal idempotent.
+    if (this->threadNode) {
+        std::shared_ptr<FsNode> parent = this->threadNode->getParent().lock();
+        if (parent) {
+            parent->removeChildByName(this->threadNode->name);
+        }
+        this->threadNode = nullptr;
+        this->commNode = nullptr;
+    }
     if (this->process) {
         this->process->removeThread(this);
     }
@@ -152,13 +167,34 @@ KThread::KThread(U32 id, const KProcessPtr& process) :
             return new BufferAccess(node, flags, &this->name);
             }, K__S_IREAD | K__S_IWRITE, k_mdev(0, 0), threadNode);
         // /proc/<pid>/task/<tid>/status — darlingserver enumerates the task dir and
-        // parses each thread's `NSpid:` (tab-separated) to map our tid to its
-        // namespace tid (src/thread.cpp). We run a single namespace so NSpid==tid.
+        // parses each thread's `NSpid:` (tab-separated, LAST value = the innermost
+        // pid-namespace tid) to map a checking-in thread's header tid to a task
+        // (src/thread.cpp). S35: report the REAL ns tid (`KThread::nsTid`, stamped
+        // by clone64/exec AFTER this constructor — hence the live lookup) as the
+        // last NSpid field, so darlingserver's primary NSpid match succeeds. With
+        // the old single-value form (our flat emulator id, which never equals the
+        // header's ns tid) EVERY checkin fell through to the server's "exactly one
+        // unregistered task" fallback — which broke the moment a dead helper's
+        // ghost task dir made that count 2 (the akwin "Received call from
+        // non-existent thread?" wedge; its ptrace stack-hint fallback gets EPERM
+        // from us and gives up).
         U32 tid = this->id;
-        Fs::addVirtualFile(threadNode->path + B("/status"), [tid](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+        std::weak_ptr<KProcess> wproc = process;
+        Fs::addVirtualFile(threadNode->path + B("/status"), [tid, wproc](const std::shared_ptr<FsNode>& node, U32 flags, U32 data) {
+            U32 ns = 0;
+            if (KProcessPtr p = wproc.lock()) {
+                if (KThread* t = p->getThreadById(tid)) {
+                    ns = t->nsTid;
+                }
+            }
             BString s;
-            s.sprintf("Name:\tthread\nState:\tR (running)\nTgid:\t%u\nPid:\t%u\nNSpid:\t%u\nThreads:\t1\n",
-                      (unsigned)tid, (unsigned)tid, (unsigned)tid);
+            if (ns) {
+                s.sprintf("Name:\tthread\nState:\tR (running)\nTgid:\t%u\nPid:\t%u\nNSpid:\t%u\t%u\nThreads:\t1\n",
+                          (unsigned)tid, (unsigned)tid, (unsigned)tid, (unsigned)ns);
+            } else {
+                s.sprintf("Name:\tthread\nState:\tR (running)\nTgid:\t%u\nPid:\t%u\nNSpid:\t%u\nThreads:\t1\n",
+                          (unsigned)tid, (unsigned)tid, (unsigned)tid);
+            }
             return new BufferAccess(node, flags, s);
             }, K__S_IREAD, k_mdev(0, 0), threadNode);
         // /proc/<pid>/task/<tid>/stat — darlingserver's getRunState parses the

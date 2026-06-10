@@ -41,6 +41,17 @@ KUnixSocketObject::KUnixSocketObject(U32 domain, U32 type, U32 protocol) : KSock
 
 KUnixSocketObject::~KUnixSocketObject() {
     if (this->boundPath.length()) {
+        // BW64_CHECKIN (S35): when a bound dgram socket dies, log it — orders a
+        // dead helper's RPC-socket teardown against the next helper's checkin
+        // (the S34 reused-fd wedge). The destroying thread is whoever dropped
+        // the last ref (usually the exiting helper's close()).
+        if (std::getenv("BW64_CHECKIN") && this->type == K_SOCK_DGRAM) {
+            KThread* dt = KThread::currentThread();
+            klog_fmt("CHECKIN-DTOR sock=%p bound='%s' byPid=%d byTid=%d",
+                     (void*)this, this->boundPath.c_str(),
+                     (int)(dt && dt->process ? dt->process->id : -1),
+                     (int)(dt ? dt->id : -1));
+        }
         KUnixSocketObject::unregisterBoundDgram(this->boundPath);
     }
     if (this->node) {
@@ -1249,7 +1260,26 @@ U32 KUnixSocketObject::dgramSend(KThread* thread, U32 destAddr, U32 destLen, std
 #endif
     // Stamp the sender's return address + credentials onto the datagram. Autobind
     // ourselves first if unbound so a reply can come back.
+    // BW64_CHECKIN (S35): for a checkin(#1)/checkout(#2) RPC, also record the
+    // sending SOCKET OBJECT + whether it was bound BEFORE this send. This is the
+    // identity darlingserver actually keys replies on (the datagram senderPath),
+    // as opposed to the guest fd NUMBER (which the guest freely reuses). It
+    // separates the two S34 hypotheses for the rejected TID57 checkin: a FRESH
+    // socket on a reused fd handle (preBound=0, new autobind path -> the race is
+    // server-side) vs the dead helper's socket object inherited via pthread
+    // reuse (preBound=1 with the old path -> a sender-identity collision the
+    // emulator can break by re-autobinding on checkin).
+    bool checkinDump = getenv("BW64_CHECKIN") && msg->data.size() >= 16;
+    U32 ckNum = checkinDump ? ((U32)msg->data[0] | ((U32)msg->data[1] << 8) |
+                               ((U32)msg->data[2] << 16) | ((U32)msg->data[3] << 24)) : 0;
+    bool preBound = this->boundPath.length() != 0;
     this->ensureAutobind();
+    if (checkinDump && (ckNum == 1u || ckNum == 2u)) {
+        klog_fmt("CHECKIN-DGRAM pid=%d tid=%d %s sock=%p preBound=%d sender='%s' dest='%s'",
+                 (int)thread->process->id, (int)thread->id,
+                 ckNum == 1u ? "CHECKIN" : "CHECKOUT", (void*)this, preBound ? 1 : 0,
+                 this->boundPath.c_str(), destPath.c_str());
+    }
     msg->hasSender = true;
     msg->senderPath = this->boundPath;
     msg->senderPid = thread->process->id;
