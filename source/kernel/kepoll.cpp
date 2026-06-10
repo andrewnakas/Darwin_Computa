@@ -32,6 +32,9 @@ KEPoll::~KEPoll() {
      for( const auto& n : this->data ) {
          delete n.value;
     }
+    for (Data* d : this->graveyard) {
+        delete d;
+    }
 }
 
 void KEPoll::setBlocking(bool blocking) {
@@ -103,6 +106,7 @@ void KEPoll::waitForEvents(BOXEDWINE_CONDITION& parentCondition, U32 events) {
         BOXEDWINE_CONDITION_REMOVE_PARENT(this->changeCond, parentCondition);
     }
 
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
     for (const auto& n : this->data) {
         Data* reg = n.value;
         if (!reg->armed) {
@@ -127,6 +131,7 @@ bool KEPoll::isReadReady() {
     if (!thread || !thread->process) {
         return false;
     }
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
     for (const auto& n : this->data) {
         Data* reg = n.value;
         if (!reg->armed) {
@@ -171,6 +176,7 @@ U64 KEPoll::readReadySeq() {
     if (!thread || !thread->process) {
         return this->changeSeq;
     }
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
     U64 seq = this->changeSeq;
     for (const auto& n : this->data) {
         Data* reg = n.value;
@@ -262,39 +268,54 @@ U32 KEPoll::ctl(KMemory* memory, U32 op, FD fd, U32 address) {
         return -K_EBADF;
     }
 
-    Data* existing = this->data[fd];
+    {
+        BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
+        Data* existing = this->data[fd];
 
-    switch (op) {
-        case K_EPOLL_CTL_ADD:
-            if (existing) {
-                return -K_EEXIST;
-            }
-            existing = new Data();
-            existing->fd = fd;
-            existing->events = memory->readd(address);
-            existing->data = memory->readq(address + 4);
-            existing->lastReported = 0;
-            existing->armed = true;
-            this->data.set(fd, existing);
-            break;
-        case K_EPOLL_CTL_DEL:
-            if (!existing)
-                return -K_ENOENT;
-            this->data.remove(fd);
-            delete existing;
-            break;
-        case K_EPOLL_CTL_MOD:
-            if (!existing)
-                return -K_ENOENT;
-            existing->events = memory->readd(address);
-            existing->data = memory->readq(address + 4);
-            // MOD re-arms an EPOLLONESHOT registration and resets the edge state,
-            // so a level that is still asserted is reported again after re-arm.
-            existing->lastReported = 0;
-            existing->armed = true;
-            break;
-        default:
-            return -K_EINVAL;
+        switch (op) {
+            case K_EPOLL_CTL_ADD:
+                if (existing) {
+                    kwarn_fmt("KEPoll::ctl ADD -> EEXIST fd=%d (stale registration?)", (int)fd);
+                    return -K_EEXIST;
+                }
+                existing = new Data();
+                existing->fd = fd;
+                existing->events = memory->readd(address);
+                existing->data = memory->readq(address + 4);
+                existing->lastReported = 0;
+                existing->armed = true;
+                this->data.set(fd, existing);
+                break;
+            case K_EPOLL_CTL_DEL:
+                if (!existing) {
+                    kwarn_fmt("KEPoll::ctl DEL -> ENOENT fd=%d", (int)fd);
+                    return -K_ENOENT;
+                }
+                this->data.remove(fd);
+                // A blocked epoll_wait holds raw Data* into this registration
+                // (owners + suppressWriteback); park it until the last waiter is
+                // out instead of freeing under it.
+                if (this->activeWaiters) {
+                    this->graveyard.push_back(existing);
+                } else {
+                    delete existing;
+                }
+                break;
+            case K_EPOLL_CTL_MOD:
+                if (!existing) {
+                    kwarn_fmt("KEPoll::ctl MOD -> ENOENT fd=%d", (int)fd);
+                    return -K_ENOENT;
+                }
+                existing->events = memory->readd(address);
+                existing->data = memory->readq(address + 4);
+                // MOD re-arms an EPOLLONESHOT registration and resets the edge state,
+                // so a level that is still asserted is reported again after re-arm.
+                existing->lastReported = 0;
+                existing->armed = true;
+                break;
+            default:
+                return -K_EINVAL;
+        }
     }
     // The monitored fd-set changed — wake any thread blocked in a poll-on-epoll
     // select/poll on this epoll fd so it re-links over the new set (see
@@ -323,30 +344,36 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
     // to return — exactly the busy-spin darlingserver's EPOLLET listener hit.
     thread->pollData.clear();
     std::vector<Data*> owners;
-    for( const auto& n : this->data ) {
-        Data* next = n.value;
-        if (!next->armed) {
-            continue;
-        }
-        KPollData pollData;
+    {
+        BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
+        for( const auto& n : this->data ) {
+            Data* next = n.value;
+            if (!next->armed) {
+                continue;
+            }
+            KPollData pollData;
 
-        pollData.events = next->events;
-        pollData.fd = next->fd;
-        pollData.data = next->data;
-        bool edge = (next->events & K_EPOLLET) != 0;
-        pollData.suppress = edge ? next->lastReported : 0;
-        // For ET fds let internal_poll age lastReported in place every cycle (it
-        // points straight at the registration's mask). next lives in this->data
-        // for the whole call, so the pointer stays valid across the poll/block.
-        pollData.suppressWriteback = edge ? &next->lastReported : nullptr;
-        // Seed the per-arrival edge baseline so internal_poll can tell whether a
-        // new datagram/chunk arrived since our last POLLIN delivery (ET only).
-        pollData.lastReadSeq = edge ? next->lastReadSeq : 0;
-        thread->pollData.push_back(pollData);
-        owners.push_back(next);
-        pollCount++;
+            pollData.events = next->events;
+            pollData.fd = next->fd;
+            pollData.data = next->data;
+            bool edge = (next->events & K_EPOLLET) != 0;
+            pollData.suppress = edge ? next->lastReported : 0;
+            // For ET fds let internal_poll age lastReported in place every cycle (it
+            // points straight at the registration's mask). next stays alive for the
+            // whole call — a concurrent DEL parks it in graveyard while
+            // activeWaiters != 0 — so the pointer stays valid across the poll/block.
+            pollData.suppressWriteback = edge ? &next->lastReported : nullptr;
+            // Seed the per-arrival edge baseline so internal_poll can tell whether a
+            // new datagram/chunk arrived since our last POLLIN delivery (ET only).
+            pollData.lastReadSeq = edge ? next->lastReadSeq : 0;
+            thread->pollData.push_back(pollData);
+            owners.push_back(next);
+            pollCount++;
+        }
+        this->activeWaiters++;
     }
     result = internal_poll(thread, thread->pollData.data(), pollCount, timeout);
+    BOXEDWINE_CRITICAL_SECTION_WITH_MUTEX(dataMutex);
     if (result >= 0) {
         result = 0;
         for (size_t idx = 0; idx < thread->pollData.size(); idx++) {
@@ -419,6 +446,13 @@ U32 KEPoll::wait(KThread* thread, U32 events, U32 maxevents, U32 timeout) {
                 }
             }
         }
+    }
+    this->activeWaiters--;
+    if (this->activeWaiters == 0 && this->graveyard.size()) {
+        for (Data* d : this->graveyard) {
+            delete d;
+        }
+        this->graveyard.clear();
     }
     return result;
 }

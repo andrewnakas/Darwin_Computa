@@ -74,6 +74,24 @@ private:
     };
     BHashTable<U32, Data*> data;
 
+    // S35: guards data/graveyard/activeWaiters. Linux epoll_ctl/epoll_wait are
+    // thread-safe and darlingserver leans on that: worker threads add/remove
+    // process monitors (epoll_ctl ADD/DEL) while the main loop re-arms its wakeup
+    // eventfd (EPOLL_CTL_MOD) and blocks in epoll_wait. Unsynchronized BHashTable
+    // mutation raced those lookups — a transient miss returned ENOENT for a live
+    // registration and darlingserver aborted ("Failed to modify eventfd in epoll
+    // context"). NB lock order is dataMutex -> kobject locks (waitForEvents/
+    // isReadReady call into members while holding it); nothing takes dataMutex
+    // from inside a kobject, so the order is acyclic for nested epolls too.
+    BOXEDWINE_MUTEX dataMutex;
+
+    // DEL while an epoll_wait is blocked parks the Data here instead of freeing
+    // it: wait() snapshots raw Data* (owners + pollData.suppressWriteback, which
+    // internal_poll writes through while blocked), so freeing on DEL would be a
+    // use-after-free. The last waiter out reaps the graveyard.
+    std::vector<Data*> graveyard;
+    U32 activeWaiters = 0;
+
     // Signalled whenever the monitored fd-set changes (epoll_ctl ADD/MOD/DEL). A
     // poll-on-epoll waiter (select/poll blocked on this epoll fd) parent-links
     // this in waitForEvents so a membership change wakes it — otherwise an fd
