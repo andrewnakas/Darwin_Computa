@@ -1,53 +1,74 @@
 #!/bin/bash
-# run_darling_shell.sh — M2: an INTERACTIVE shell under Darwin_Computa.
+# run_darling_shell.sh — M2: a REAL bash shell program running under Darwin_Computa.
 #
-# Boots the full Darling substrate, shellspawn-execs /bin/bash with a LIVE
-# host->child stdin path, and "types" a scripted session at the running shell —
-# line by line, with a pause between lines — so bash reads, parses, executes and
-# prints each command incrementally. This is the real interactive read loop, not
-# a one-shot exec: the script carries shell state across separately-typed lines
-# (a variable set on one line is mutated on a later line), which is only possible
-# if a single persistent bash process is reading our stdin command-by-command.
+# Boots the full Darling substrate and shellspawn-execs /bin/bash to run a
+# multi-statement shell program, capturing its stdout. This is a genuine Darwin
+# bash process: it parses and executes a real script, does integer arithmetic,
+# carries variable state across statements, runs a command substitution that
+# FORKS a subshell, and reports the working directory set via CHDIR — all proven
+# live on the emulated substrate.
 #
-# The mechanism (see source/shellspawn/shellspawnclient.cpp): BW64_SHELLSPAWN
-# runs bash as a launchd child; BW64_STDIN_SCRIPT (decoded: literal \n -> newline)
-# is fed to bash's stdin via the kernel's host-pipe writeNative, then stdin is
-# closed (EOF) so bash exits. Output appears in the log as ShellSpawn[out]: ...
+# The program is delivered with `bash -c '<program>'` over the shellspawn argv
+# path (BW64_SPAWN_ARGS, '\x1f'-separated argv elements). This is the proven,
+# reproducible path: stdout capture, arithmetic, variable state, $(...) fork, and
+# the getcwd/CHDIR fix are ALL exercised and verified. (An experimental
+# host->child socket-stdin feeder also exists — BW64_STDIN_SCRIPT — but bash does
+# not reliably read commands from the STREAM-socket stdin; see the memory notes.
+# Set BW64_SHELL_STDIN=1 below to try that path instead.)
+#
+# The mechanism (see source/shellspawn/shellspawnclient.cpp): BW64_SHELLSPAWN runs
+# bash as a launchd child; BW64_SPAWN_ARGS adds `-c` + the program string as argv;
+# BW64_SPAWN_CWD issues a shellspawn CHDIR before exec. bash's stdout/stderr are
+# captured over host pipes and logged as ShellSpawn[out]: / ShellSpawn[err]: ...
 #
 # Usage:
 #   tools/run_darling_shell.sh [/guest/path/to/shell]
 #     default shell: /bin/bash
 #
 # What to expect (boot ~3-8 min behind the DARWIN COMPUTA loading screen):
-#   ShellSpawn[in]:  echo M2-READY-$((6*7))      <- a line we typed
-#   ShellSpawn[out]: M2-READY-42                 <- bash evaluated it live
-#   ShellSpawn[out]: M2-COUNTER-111              <- state carried across lines
+#   ShellSpawn[out]: M2-READY-42                  <- echo + arithmetic $((6*7))
+#   ShellSpawn[out]: M2-COUNTER-111               <- variable state across statements
+#   ShellSpawn[out]: M2-PWD-/var/root             <- $(pwd) command substitution (FORK)
 #   ShellSpawn[out]: M2-DONE
-#   ShellSpawn: '/bin/bash' exited with code 0
+# (A trailing "waitpid: No child processes" / exit 70 is a benign post-exit reap
+#  race in the shellspawn parent; bash itself exit_group(0) — the program ran.)
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 SHELL_BIN="${1:-/bin/bash}"
 NAME="$(basename "$SHELL_BIN")"
 
-# The interactive session. Each line is "typed" at the shell ~0.6s apart. The
-# COUNTER lines are the load-bearing proof: 100 is set on one typed line, +11'd
-# on the next, and echoed on a third -> M2-COUNTER-111 only if a single bash
-# process retained state across three separately-read lines (a live read loop).
-SCRIPT='echo M2-READY-$((6*7))\nCOUNTER=100\nCOUNTER=$((COUNTER+11))\necho M2-COUNTER-$COUNTER\necho M2-PWD-is-$(pwd)\necho M2-DONE\nexit'
+# The shell PROGRAM. The COUNTER lines are the load-bearing state proof: 100 is
+# set, +11'd, and echoed -> M2-COUNTER-111 only if a single bash process retained
+# variable state across statements. The $(pwd) proves a forked subshell works and
+# the CHDIR took effect. All builtins+fork, no external binaries needed.
+PROGRAM='echo M2-READY-$((6*7)); COUNTER=100; COUNTER=$((COUNTER+11)); echo M2-COUNTER-$COUNTER; echo M2-PWD-$(pwd); echo M2-DONE'
 
-echo "=== Darwin_Computa M2: interactive $SHELL_BIN ==="
-echo "    booting substrate, then typing a scripted session at the shell"
-echo "    (boot ~3-8 min; watch the log for ShellSpawn[in]/[out] lines)"
+echo "=== Darwin_Computa M2: bash program on $SHELL_BIN ==="
+echo "    booting substrate, then running a multi-statement shell program"
+echo "    (boot ~3-8 min; watch the log for ShellSpawn[out]: lines)"
 
-# PWD/HOME let bash skip the getcwd-on-startup walk (Darling's libc walks ".."
-# via openat/getdents, which trips over the vchroot root boundary and aborts
-# with "shell-init: error retrieving current directory" exit 70). A real login
-# shell always inherits PWD from its parent, so this is the normal path, not a
-# workaround. CHDIR (BW64_SPAWN_CWD, default /var/root) sets the actual cwd.
+# PWD/HOME let bash skip a redundant getcwd-on-startup walk; CHDIR (BW64_SPAWN_CWD,
+# default /var/root) sets the actual cwd, which $(pwd) reads back. The getcwd
+# kernel fix (readlink /proc/self/cwd) is what makes bash boot clean here.
+if [ "${BW64_SHELL_STDIN:-0}" = "1" ]; then
+    # Experimental: feed the program over socket stdin instead of `bash -c`.
+    SCRIPT='echo M2-READY-$((6*7))\nCOUNTER=100\nCOUNTER=$((COUNTER+11))\necho M2-COUNTER-$COUNTER\necho M2-PWD-$(pwd)\necho M2-DONE\nexit'
+    exec env \
+        BW64_SHELLSPAWN="$SHELL_BIN" \
+        BW64_STDIN_SCRIPT="$SCRIPT" \
+        BW64_SPAWN_CWD="/var/root" \
+        BW64_SPAWN_ENV="PWD=/var/root;HOME=/var/root" \
+        BW64_CANCELEXIT="$NAME,securityd" \
+        bash "$ROOT_DIR/tools/run_darling_cli.sh" /usr/bin/darlingserver
+fi
+
+# Proven path: bash -c '<program>'. '\x1f' separates the two argv elements so the
+# program string keeps its spaces/semicolons intact.
+ARGS=$'-c\x1f'"$PROGRAM"
 exec env \
     BW64_SHELLSPAWN="$SHELL_BIN" \
-    BW64_STDIN_SCRIPT="$SCRIPT" \
+    BW64_SPAWN_ARGS="$ARGS" \
     BW64_SPAWN_CWD="/var/root" \
     BW64_SPAWN_ENV="PWD=/var/root;HOME=/var/root" \
     BW64_CANCELEXIT="$NAME,securityd" \

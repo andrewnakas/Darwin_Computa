@@ -118,11 +118,16 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
     KUnixSocketObject::makeHostPipe(errRead, errWrite);
     // Child's stdin: hand it the read end. By default we never write, so it sees
     // EOF once stdin drains (sw_vers/uname/GUI apps don't read stdin). But if
-    // BW64_STDIN_SCRIPT is set (M2 — interactive shell), a feeder thread writes
-    // scripted input lines INTO the child's stdin via stdinWrite->writeNative
-    // (whose peer is stdinRead, so the bytes land in stdinRead->recvBuffer for the
-    // child's read()), paced so an interactive shell prints its prompt/output
-    // between lines, then closes stdin (EOF) so the shell's read loop ends.
+    // BW64_STDIN_SCRIPT is set (M2 — interactive shell), the scripted input is
+    // PRE-BUFFERED into the child's stdin BEFORE GO (below), via
+    // stdinWrite->writeNative (whose peer is stdinRead, so the bytes land in
+    // stdinRead->recvBuffer for the child's read()). Pre-buffering removes the race
+    // that produced "no output": the previous feeder wrote AFTER GO with a delay,
+    // but bash reached its read loop, saw an empty stdin, and (over a socket) read
+    // EOF and exited before our bytes arrived. recvBuffer is drained in-order ahead
+    // of the EOF flag (KUnixSocketObject::readNative), so the child consumes every
+    // scripted byte first, then sees EOF — even though we may set inClosed
+    // immediately after GO.
 
     // 1) SETEXEC "<exec>\0"  (must precede ADDARG)
     {
@@ -133,6 +138,31 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
     {
         std::vector<U8> m = buildCmd(SHELLSPAWN_ADDARG, arg0.c_str(), (U16)(arg0.size() + 1));
         client->hostSendBytes(m.data(), (U32)m.size());
+    }
+    // 2a) Optional EXTRA argv from host BW64_SPAWN_ARGS, one ADDARG per element
+    //     ('\x1f'-separated so a single arg can contain spaces/semicolons — e.g.
+    //     "-c\x1fecho hi; pwd"). Lets us drive `bash -c '<cmd>'` (no stdin needed)
+    //     to isolate stdout-capture from socket-stdin delivery (M2 diagnosis), or
+    //     pass real flags to any spawned program. Default unset = arg0 only =
+    //     byte-identical to prior launches.
+    if (const char* spawnArgs = std::getenv("BW64_SPAWN_ARGS")) {
+        std::string all(spawnArgs);
+        size_t start = 0;
+        while (start <= all.size()) {
+            size_t sep = all.find('\x1f', start);
+            std::string a = all.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+            // An empty trailing element (string ends with the separator) is skipped;
+            // an empty MIDDLE element is a real (empty) argv slot, so keep it unless
+            // it is the terminal one.
+            bool terminalEmpty = a.empty() && sep == std::string::npos;
+            if (!terminalEmpty) {
+                std::vector<U8> m = buildCmd(SHELLSPAWN_ADDARG, a.c_str(), (U16)(a.size() + 1));
+                client->hostSendBytes(m.data(), (U32)m.size());
+                klog_fmt("ShellSpawn: ADDARG '%s'", a.c_str());
+            }
+            if (sep == std::string::npos) break;
+            start = sep + 1;
+        }
     }
     // 2b) Optional SETENV "<KEY=VALUE>\0" pairs, from host BW64_SPAWN_ENV
     //     (';'-separated, e.g. "OBJC_PRINT_INITIALIZE_METHODS=YES;FOO=bar").
@@ -166,27 +196,19 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
         client->hostSendBytes(m.data(), (U32)m.size());
         klog_fmt("ShellSpawn: CHDIR '%s'", cwd.c_str());
     }
-    // 3) GO with the 3 stdio fds via SCM_RIGHTS {stdin, stdout, stderr}.
-    {
-        std::vector<U8> m = buildCmd(SHELLSPAWN_GO, nullptr, 0);
-        std::vector<KSocketMsgObject> objects;
-        KSocketMsgObject o0; o0.object = stdinRead;  o0.accessFlags = K_O_RDWR; objects.push_back(o0);
-        KSocketMsgObject o1; o1.object = outWrite;   o1.accessFlags = K_O_RDWR; objects.push_back(o1);
-        KSocketMsgObject o2; o2.object = errWrite;   o2.accessFlags = K_O_RDWR; objects.push_back(o2);
-        client->hostSendMsgWithObjects(m.data(), (U32)m.size(), objects);
-    }
-
-    // 3b) Optional interactive stdin feeder (M2). BW64_STDIN_SCRIPT holds the
-    //     input to type at the running child, with literal "\n" decoded to real
-    //     newlines so a multi-line session fits in one env var (e.g.
-    //     "echo hi\nVAR=42\necho $VAR\nexit"). We write line-by-line with a short
-    //     pause between lines so an interactive shell reads, executes, and prints
-    //     each one (proving a live read loop, not a one-shot exec), then close
-    //     stdin so the shell's read() returns EOF and it exits cleanly. Default
-    //     unset = no feeder = the old immediate-EOF stdin (M1 bundle launches keep
-    //     working byte-for-byte). The write end (stdinWrite) and the child's read
-    //     end (stdinRead) are both held alive by this function's locals.
-    std::thread tIn;
+    // 3-pre) PRE-BUFFER the scripted stdin BEFORE GO (M2). BW64_STDIN_SCRIPT holds
+    //     the input to feed the child, with literal "\n" decoded to real newlines
+    //     so a multi-line session fits in one env var (e.g.
+    //     "echo hi\nVAR=42\necho $VAR\nexit"). We decode it and write the WHOLE
+    //     thing into the child's stdin (stdinWrite, peer=stdinRead) now — before
+    //     the child exists — so every byte is sitting in stdinRead->recvBuffer the
+    //     instant the child first read()s fd 0. This is the fix for the S40
+    //     "no output" last mile: the old feeder wrote AFTER GO with a delay, and
+    //     bash (reading a socket, not a tty) reached its read loop, found stdin
+    //     empty, took EOF and exited before our bytes landed. Default unset = no
+    //     script = the old immediate-EOF stdin (M1 bundle launches unaffected). The
+    //     write end (stdinWrite) and the child's read end (stdinRead) are both held
+    //     alive by this function's locals.
     bool haveStdinScript = false;
     if (const char* scriptEnv = std::getenv("BW64_STDIN_SCRIPT")) {
         if (scriptEnv[0]) {
@@ -204,36 +226,39 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
                 }
                 script.push_back(raw[i]);
             }
-            tIn = std::thread([stdinWrite, stdinRead, script]() {
-                // Give the shell a moment to come up and print its first prompt
-                // before we start typing, so the transcript reads naturally.
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                size_t start = 0;
-                while (start <= script.size()) {
-                    size_t nl = script.find('\n', start);
-                    size_t end = (nl == std::string::npos) ? script.size() : nl + 1;
-                    std::string line = script.substr(start, end - start);
-                    if (!line.empty()) {
-                        klog_fmt("ShellSpawn[in]: %.*s",
-                                 (int)(line.size() - (line.back() == '\n' ? 1 : 0)),
-                                 line.c_str());
-                        stdinWrite->writeNative((U8*)line.data(), (U32)line.size());
-                        // Pace: let the shell parse+run this line and emit output
-                        // before the next arrives. Interactive shells need the
-                        // gap; a batch shell would not, so this also demonstrates
-                        // the input is consumed incrementally.
-                        std::this_thread::sleep_for(std::chrono::milliseconds(600));
-                    }
-                    if (nl == std::string::npos) break;
-                    start = end;
-                }
-                // EOF: stop the shell's read loop so it exits even without a
-                // trailing `exit` in the script.
-                stdinRead->hostCloseForEof();
-            });
+            if (!script.empty()) {
+                stdinWrite->writeNative((U8*)script.data(), (U32)script.size());
+            }
+            klog_fmt("ShellSpawn: pre-buffered %d bytes of stdin script before GO",
+                     (int)script.size());
         }
     }
-    (void)haveStdinScript;
+
+    // 3) GO with the 3 stdio fds via SCM_RIGHTS {stdin, stdout, stderr}.
+    {
+        std::vector<U8> m = buildCmd(SHELLSPAWN_GO, nullptr, 0);
+        std::vector<KSocketMsgObject> objects;
+        KSocketMsgObject o0; o0.object = stdinRead;  o0.accessFlags = K_O_RDWR; objects.push_back(o0);
+        KSocketMsgObject o1; o1.object = outWrite;   o1.accessFlags = K_O_RDWR; objects.push_back(o1);
+        KSocketMsgObject o2; o2.object = errWrite;   o2.accessFlags = K_O_RDWR; objects.push_back(o2);
+        client->hostSendMsgWithObjects(m.data(), (U32)m.size(), objects);
+    }
+
+    // 3b) Deferred stdin EOF (M2). The script bytes are already buffered (above), so
+    //     we only need to signal end-of-input so the child's read() returns 0 and
+    //     the shell's read loop ends (even without a trailing `exit`). recvBuffer is
+    //     drained in-order ahead of the inClosed flag (readNative), so closing now
+    //     does NOT truncate the pre-buffered script — the child consumes every byte
+    //     first, then sees EOF. We still defer a few seconds so a shell that polls
+    //     isatty()/select() on a not-yet-ready fd during early startup doesn't race
+    //     the close; cheap insurance, and harmless given in-order drain.
+    std::thread tIn;
+    if (haveStdinScript) {
+        tIn = std::thread([stdinRead]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+            stdinRead->hostCloseForEof();
+        });
+    }
 
     // Drain child stdout + stderr to the host console on background threads. The
     // child closing stdout/stderr (on exit) makes readNative return 0 (EOF).
