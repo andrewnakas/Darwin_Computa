@@ -1,0 +1,5 @@
+Hello from inside Darwin Computa.
+
+This text was loaded from DarwinComputa.app/Contents/Resources/Welcome.txt
+by [NSBundle mainBundle] at runtime — proof that this process is running as a
+real Mac application bundle, not a bare executable.

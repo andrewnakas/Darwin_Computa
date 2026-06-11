@@ -432,6 +432,37 @@ if [ -f "$CGPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
             echo "--- S31: staged akwin (AppKit NSWindow probe) at usr/bin/akwin ---"
         fi
     fi
+    # S37: akrun — the interactive AppKit probe (NSButton toggles bg, NSTextField,
+    # live event pump logging every NSEvent). The default GUI app for
+    # tools/run_darling_gui.sh. Run DSERVER_INIT=/usr/bin/akrun (or shellspawn).
+    if [ -f "$CGPROBE_SRC/build-akrun.sh" ] && bash "$CGPROBE_SRC/build-akrun.sh" >/dev/null 2>&1 && [ -f "$CGPROBE_SRC/akrun" ]; then
+        DPFX="$STAGEHOST/dist/stage/usr/libexec/darling"
+        if [ -d "$DPFX/usr/bin" ]; then
+            cp "$CGPROBE_SRC/akrun" "$DPFX/usr/bin/akrun"; chmod 755 "$DPFX/usr/bin/akrun"
+            echo "--- S37: staged akrun (interactive AppKit probe) at usr/bin/akrun ---"
+        fi
+    fi
+fi
+
+# --- S38: DarwinComputa.app — a real Mac .app BUNDLE -------------------------
+# Same interactive app as akrun, but delivered as a proper bundle
+# (Contents/{Info.plist, MacOS/DarwinComputa, Resources/Welcome.txt}) installed
+# at the guest path /Applications/DarwinComputa.app. Launching it execs
+# Contents/MacOS/DarwinComputa via shellspawn, so Darling's CoreFoundation
+# derives [NSBundle mainBundle] from the executable path -> Info.plist + Resources
+# resolve. VERIFIED S38: 'BUNDLE OK — mainBundle resolved to a .app'. open(1)/
+# LaunchServices is NOT used (non-functional on this substrate). Launch with
+# tools/run_darling_app_bundle.sh. See tools/darwin-app/.
+APP_SRC="$(cd "$(dirname "$0")/.." && pwd)/darwin-app"
+if [ -f "$APP_SRC/build-akapp.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-akapp.sh" >/dev/null 2>&1; then
+        # build-akapp.sh installs into dist/stage already; confirm it landed.
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/DarwinComputa.app" ]; then
+            echo "--- S38: staged DarwinComputa.app at Applications/DarwinComputa.app ---"
+        fi
+    else
+        echo "WARNING: akapp bundle build failed; DarwinComputa.app not staged." >&2
+    fi
 fi
 
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
