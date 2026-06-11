@@ -156,8 +156,17 @@ bool cleanPath(std::vector<BString>& parts) {
             continue;
         }
         if (parts[i]=="..") {
-            if (i==0)
-                return false;
+            if (i==0) {
+                // ".." at the filesystem root resolves to the root itself
+                // (Linux: "/.." == "/"). Returning false here made the path
+                // ENOENT, which broke any ".."-walk that reaches "/": notably
+                // Darling bash's getcwd (__getcwd_generic) walks up via ".."
+                // and, never finding a valid root, aborted with "shell-init:
+                // error retrieving current directory ... cannot access parent
+                // directories" (exit 70) — blocking the interactive shell (M2).
+                parts.erase(parts.begin()+i, parts.begin()+i+1);
+                continue;
+            }
             parts.erase(parts.begin()+i-1, parts.begin()+i+1);
             i--;
             continue;

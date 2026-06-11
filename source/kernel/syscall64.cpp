@@ -1038,13 +1038,38 @@ static U64 sys_read64(CPU64* cpu, U64 fd, U64 buf, U64 count) {
     return (U64)got;
 }
 
-// openat(dirfd, path, flags, mode). For dirfd we honour AT_FDCWD (-100) and
-// any "absolute" path. Relative paths against a real dirfd aren't supported
-// yet — ld-linux always passes AT_FDCWD or absolute, so this covers the
-// startup path.
+// openat(dirfd, path, flags, mode). For dirfd we honour AT_FDCWD (-100), any
+// absolute path, AND a relative path against a real dirfd (resolved below via
+// at_baseDir64). The last case is what glibc's generic getcwd (__getcwd_generic)
+// needs: it walks up from cwd doing openat(dirfd,"..",...) + fstatat(dirfd,name)
+// with REAL dirfds. Returning ENOENT for those made bash's getcwd fall back and
+// abort with "shell-init: error retrieving current directory ... cannot access
+// parent directories" (exit 70), blocking the interactive shell (M2).
 #ifndef K_AT_FDCWD
 #define K_AT_FDCWD (-100)
 #endif
+
+// Resolve the base directory for an *at-relative path: AT_FDCWD -> the process
+// cwd; a real dirfd -> that fd's directory node path. Returns false (with
+// *err set to a -errno) if the dirfd is bad or not a directory. On success
+// *base holds the directory path to resolve `path` against.
+static bool at_baseDir64(CPU64* cpu, S32 dirfd, BString& base, S32* err) {
+    auto& process = cpu->thread->process;
+    if (dirfd == (S32)K_AT_FDCWD) {
+        base = process->currentDirectory;
+        return true;
+    }
+    KFileDescriptorPtr fdesc = process->getFileDescriptor((FD)dirfd);
+    if (!fdesc) { *err = -9; return false; } // -EBADF
+    std::shared_ptr<KFile> kfile = std::dynamic_pointer_cast<KFile>(fdesc->kobject);
+    if (!kfile || !kfile->openFile || !kfile->openFile->node ||
+        !kfile->openFile->node->isDirectory()) {
+        *err = (S32)-K_ENOTDIR;
+        return false;
+    }
+    base = kfile->openFile->node->path;
+    return true;
+}
 static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mode*/) {
     if (!cpu->thread || !cpu->thread->process) return (U64)-K_ENOSYS;
     if (!pathAddr) return (U64)-K_EFAULT;
@@ -1097,13 +1122,15 @@ static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mo
                  (unsigned long long)flags);
     }
     bool isAbs = (path[0] == '/');
+    BString baseDir = process->currentDirectory;
     if (!isAbs && (S32)dirfd != K_AT_FDCWD) {
-        klog_fmt("sys_openat64: relative path '%s' with dirfd=%d not yet supported",
-                 path, (int)(S32)dirfd);
-        return (U64)-2;
+        S32 err = 0;
+        if (!at_baseDir64(cpu, (S32)dirfd, baseDir, &err)) {
+            return (U64)(S64)err;
+        }
     }
     KFileDescriptorPtr result;
-    U32 rc = process->openFile(process->currentDirectory, BString::copy(path),
+    U32 rc = process->openFile(baseDir, BString::copy(path),
                                (U32)flags, result);
     if ((S32)rc < 0) {
         if (getenv("BW64_DLLTRACE") && (strstr(path, ".dll") || strstr(path, ".exe") ||
@@ -1402,19 +1429,32 @@ static void writeStatBuf64(KMemory64* mem, U64 addr, U64 size, U32 mode,
 static U64 sys_fstat64(CPU64* cpu, U64 fd, U64 statbuf);
 
 // Path-based stat shared by stat/lstat/newfstatat. followSymlink controls
-// the lstat vs stat distinction (Fs::getNodeFromLocalPath's third arg).
-static U64 sys_stat_path64(CPU64* cpu, U64 pathAddr, U64 statbuf, bool followSymlink) {
+// the lstat vs stat distinction (Fs::getNodeFromLocalPath's third arg). baseDir
+// is the directory a relative path resolves against — the process cwd for
+// stat/lstat, or a real dirfd's directory for the fstatat(dirfd,relpath) case
+// (empty string = use process cwd).
+static U64 sys_stat_path64(CPU64* cpu, U64 pathAddr, U64 statbuf, bool followSymlink,
+                           BString baseDir = B("")) {
     if (!cpu->thread || !cpu->thread->process) return (U64)-K_ENOSYS;
     if (!pathAddr || !statbuf) return (U64)-K_EFAULT;
     char path[1024] = {0};
     cpu->memory->memcpyFromGuest(path, pathAddr, sizeof(path) - 1);
     BString bpath = BString::copy(path);
+    if (!baseDir.length()) baseDir = cpu->thread->process->currentDirectory;
     std::shared_ptr<FsNode> node = Fs::getNodeFromLocalPath(
-        cpu->thread->process->currentDirectory, bpath, followSymlink);
+        baseDir, bpath, followSymlink);
     if (getenv("BW64_SYSTRACE")) {
         klog_fmt("sys_stat_path64: '%s' (cwd='%s') -> %s", path,
                  cpu->thread->process->currentDirectory.c_str(),
                  node ? "OK" : "ENOENT");
+    }
+    // BW64_CWDTRACE: log only the FAILING stats with their resolved path + base,
+    // so the getcwd-walk wall is named exactly (the bare CWDTRACE in the dispatch
+    // tail has the errno but not the path).
+    if (!node && getenv("BW64_CWDTRACE")) {
+        klog_fmt("CWDPATH pid=%d %sstat '%s' base='%s' -> ENOENT",
+                 (int)cpu->thread->process->id, followSymlink ? "" : "l",
+                 path, baseDir.c_str());
     }
     // BW64_LDTRACE: light trace of stat/lstat on LaunchDaemons/Library paths so we
     // can see whether glob lstats the literal `*.plist` pattern and our resolver
@@ -1455,10 +1495,14 @@ static U64 sys_newfstatat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 statbuf, U6
         klog_fmt("sys_newfstatat64: dirfd=%d path='%s' flags=0x%llx",
                  (int)(S32)dirfd, path, (unsigned long long)flags);
     }
+    BString baseDir = B(""); // empty -> sys_stat_path64 uses the process cwd
     if (!isAbs && (S32)dirfd != K_AT_FDCWD) {
-        return (U64)-2;
+        S32 err = 0;
+        if (!at_baseDir64(cpu, (S32)dirfd, baseDir, &err)) {
+            return (U64)(S64)err;
+        }
     }
-    return sys_stat_path64(cpu, pathAddr, statbuf, !(flags & K_AT_SYMLINK_NOFOLLOW));
+    return sys_stat_path64(cpu, pathAddr, statbuf, !(flags & K_AT_SYMLINK_NOFOLLOW), baseDir);
 }
 
 static U64 sys_fstat64(CPU64* cpu, U64 fd, U64 statbuf) {
@@ -1855,6 +1899,9 @@ static U64 sys_readlink64(CPU64* cpu, U64 pathAddr, U64 buf, U64 sz) {
     if (getenv("BW64_LDTRACE") && (strstr(path, "Launch") || strstr(path, "Library"))) {
         klog_fmt("LDTRACE pid=%d readlink '%s'", (int)cpu->thread->process->id, path);
     }
+    if (getenv("BW64_CWDTRACE")) {
+        klog_fmt("CWDLINK pid=%d readlink '%s'", (int)cpu->thread->process->id, path);
+    }
     KProcess* proc = cpu->thread->process.get();
     BString pidExe = B("/proc/") + BString::valueOf(proc->id) + B("/exe");
     BString resolved;
@@ -1899,6 +1946,19 @@ static U64 sys_readlink64(CPU64* cpu, U64 pathAddr, U64 buf, U64 sz) {
                std::strcmp(path, "/proc/thread-self/exe") == 0 ||
                pidExe == path) {
         resolved = proc->exe;
+    } else if (std::strcmp(path, "/proc/self/cwd") == 0 ||
+               std::strcmp(path, "/proc/thread-self/cwd") == 0 ||
+               (B("/proc/") + BString::valueOf(proc->id) + B("/cwd")) == path) {
+        // /proc/<pid>/cwd -> the process working directory. getcwd() (glibc AND
+        // Darling's libsystem_kernel) tries readlink("/proc/self/cwd") as its
+        // fast path; without it, it fell back to __getcwd_generic, which walks
+        // ".." via openat/getdents and breaks on our VFS — Darling bash then
+        // aborted at startup with "shell-init: error retrieving current
+        // directory ... cannot access parent directories" (exit 70), the M2
+        // interactive-shell wall. Returning the cwd here makes getcwd succeed
+        // immediately.
+        resolved = proc->currentDirectory;
+        if (!resolved.length()) resolved = B("/");
     } else {
         std::shared_ptr<FsNode> n = Fs::getNodeFromLocalPath(
             proc->currentDirectory, BString::copy(path), false);
@@ -4163,17 +4223,24 @@ void ksyscall64(CPU64* cpu) {
             }
             break;
         case X64_SYS_getcwd: {
-            // getcwd(buf, size) — copy current directory string out. Returns
-            // a pointer to buf on success, -ERANGE if size is too small.
-            if (!a1 || a2 == 0) { ret = (U64)-K_EFAULT; break; }
+            // getcwd(buf, size) — copy the current directory string out. The Linux
+            // syscall (UNLIKE the libc wrapper) returns the NUMBER OF BYTES WRITTEN
+            // (length including NUL), not a pointer. Returning a1 (the buffer
+            // pointer) made glibc's __getcwd treat the syscall as anomalous and
+            // fall back to its generic __getcwd_generic, which manually walks ".."
+            // via stat/readdir and hit EINVAL here -> bash aborted with
+            // "shell-init: error retrieving current directory: getcwd: cannot
+            // access parent directories" (exit 70), blocking the interactive shell
+            // (M2). Match the 32-bit KProcess::getcwd contract: return len+1.
+            if (!a1 || a2 == 0) { ret = (U64)-K_EINVAL; break; }
             // No-process standalone runner: default cwd to "/".
             BString cwd = (cpu->thread && cpu->thread->process)
                               ? cpu->thread->process->currentDirectory : B("/");
             if (!cwd.length()) cwd = B("/");
             U64 need = (U64)cwd.length() + 1;
-            if (need > a2) { ret = (U64)-34; /* -ERANGE */ break; }
+            if (need > a2) { ret = (U64)-K_ERANGE; break; }
             cpu->memory->memcpyToGuest(a1, cwd.c_str(), need);
-            ret = a1;
+            ret = need;
             break;
         }
         case X64_SYS_fsync:
@@ -5695,6 +5762,23 @@ void ksyscall64(CPU64* cpu) {
         return;
     }
     if (cpu->thread) cpu->thread->inSyscall64 = false;
+    // BW64_CWDTRACE: pinpoint the getcwd-walk failure. Log the RETURN value of
+    // the path-walk syscalls (openat/stat/lstat/newfstatat/getdents64/getcwd)
+    // whenever it is negative (an errno), with the call number + rip. The first
+    // negative one in bash's getcwd region is the exact wall. Default off.
+    if (getenv("BW64_CWDTRACE")) {
+        U32 b = (U32)nr;
+        bool walkCall = (b == 257 /*openat*/ || b == 262 /*newfstatat*/ ||
+                         b == 4 /*stat*/ || b == 6 /*lstat*/ ||
+                         b == 217 /*getdents64*/ || b == 79 /*getcwd*/ ||
+                         b == 78 /*getdents*/ || b == 2 /*open*/);
+        if (walkCall && (S64)ret < 0) {
+            klog_fmt("CWDTRACE [pid=%d] #%llu %s -> %lld rip=0x%llx",
+                     (int)(cpu->thread ? cpu->thread->process->id : -1),
+                     (unsigned long long)nr, x64SyscallName((U32)nr),
+                     (long long)(S64)ret, (unsigned long long)cpu->rip);
+        }
+    }
     cpu->reg[X64_RAX].setU64(ret);
 }
 

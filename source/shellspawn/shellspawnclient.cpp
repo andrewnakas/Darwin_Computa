@@ -116,9 +116,13 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
     KUnixSocketObject::makeHostPipe(stdinRead, stdinWrite);
     KUnixSocketObject::makeHostPipe(outRead, outWrite);
     KUnixSocketObject::makeHostPipe(errRead, errWrite);
-    // Child's stdin: hand it the read end; we never write, so it sees EOF once the
-    // write end is shut. Mark the write end's peer closed so reads return 0.
-    // (We simply never write to stdinWrite; sw_vers/uname don't read stdin.)
+    // Child's stdin: hand it the read end. By default we never write, so it sees
+    // EOF once stdin drains (sw_vers/uname/GUI apps don't read stdin). But if
+    // BW64_STDIN_SCRIPT is set (M2 — interactive shell), a feeder thread writes
+    // scripted input lines INTO the child's stdin via stdinWrite->writeNative
+    // (whose peer is stdinRead, so the bytes land in stdinRead->recvBuffer for the
+    // child's read()), paced so an interactive shell prints its prompt/output
+    // between lines, then closes stdin (EOF) so the shell's read loop ends.
 
     // 1) SETEXEC "<exec>\0"  (must precede ADDARG)
     {
@@ -149,6 +153,19 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
             start = sep + 1;
         }
     }
+    // 2c) CHDIR to a valid working directory (M2). The shellspawn child otherwise
+    //     inherits launchd's cwd, which is an inaccessible inode here — so the
+    //     child's getcwd() returns EINVAL and bash aborts init with "shell-init:
+    //     error retrieving current directory" (exit 70) before running anything.
+    //     /var/root exists in the rootfs and is a safe default; override with
+    //     BW64_SPAWN_CWD. The server applies CHDIR in the child before exec.
+    {
+        const char* cwdEnv = std::getenv("BW64_SPAWN_CWD");
+        std::string cwd = (cwdEnv && cwdEnv[0]) ? cwdEnv : "/var/root";
+        std::vector<U8> m = buildCmd(SHELLSPAWN_CHDIR, cwd.c_str(), (U16)(cwd.size() + 1));
+        client->hostSendBytes(m.data(), (U32)m.size());
+        klog_fmt("ShellSpawn: CHDIR '%s'", cwd.c_str());
+    }
     // 3) GO with the 3 stdio fds via SCM_RIGHTS {stdin, stdout, stderr}.
     {
         std::vector<U8> m = buildCmd(SHELLSPAWN_GO, nullptr, 0);
@@ -158,6 +175,65 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
         KSocketMsgObject o2; o2.object = errWrite;   o2.accessFlags = K_O_RDWR; objects.push_back(o2);
         client->hostSendMsgWithObjects(m.data(), (U32)m.size(), objects);
     }
+
+    // 3b) Optional interactive stdin feeder (M2). BW64_STDIN_SCRIPT holds the
+    //     input to type at the running child, with literal "\n" decoded to real
+    //     newlines so a multi-line session fits in one env var (e.g.
+    //     "echo hi\nVAR=42\necho $VAR\nexit"). We write line-by-line with a short
+    //     pause between lines so an interactive shell reads, executes, and prints
+    //     each one (proving a live read loop, not a one-shot exec), then close
+    //     stdin so the shell's read() returns EOF and it exits cleanly. Default
+    //     unset = no feeder = the old immediate-EOF stdin (M1 bundle launches keep
+    //     working byte-for-byte). The write end (stdinWrite) and the child's read
+    //     end (stdinRead) are both held alive by this function's locals.
+    std::thread tIn;
+    bool haveStdinScript = false;
+    if (const char* scriptEnv = std::getenv("BW64_STDIN_SCRIPT")) {
+        if (scriptEnv[0]) {
+            haveStdinScript = true;
+            std::string raw(scriptEnv);
+            // Decode the two-char escape "\n" -> newline (and "\\" -> backslash).
+            std::string script;
+            script.reserve(raw.size());
+            for (size_t i = 0; i < raw.size(); i++) {
+                if (raw[i] == '\\' && i + 1 < raw.size()) {
+                    char nxt = raw[i + 1];
+                    if (nxt == 'n') { script.push_back('\n'); i++; continue; }
+                    if (nxt == 't') { script.push_back('\t'); i++; continue; }
+                    if (nxt == '\\') { script.push_back('\\'); i++; continue; }
+                }
+                script.push_back(raw[i]);
+            }
+            tIn = std::thread([stdinWrite, stdinRead, script]() {
+                // Give the shell a moment to come up and print its first prompt
+                // before we start typing, so the transcript reads naturally.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                size_t start = 0;
+                while (start <= script.size()) {
+                    size_t nl = script.find('\n', start);
+                    size_t end = (nl == std::string::npos) ? script.size() : nl + 1;
+                    std::string line = script.substr(start, end - start);
+                    if (!line.empty()) {
+                        klog_fmt("ShellSpawn[in]: %.*s",
+                                 (int)(line.size() - (line.back() == '\n' ? 1 : 0)),
+                                 line.c_str());
+                        stdinWrite->writeNative((U8*)line.data(), (U32)line.size());
+                        // Pace: let the shell parse+run this line and emit output
+                        // before the next arrives. Interactive shells need the
+                        // gap; a batch shell would not, so this also demonstrates
+                        // the input is consumed incrementally.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                    }
+                    if (nl == std::string::npos) break;
+                    start = end;
+                }
+                // EOF: stop the shell's read loop so it exits even without a
+                // trailing `exit` in the script.
+                stdinRead->hostCloseForEof();
+            });
+        }
+    }
+    (void)haveStdinScript;
 
     // Drain child stdout + stderr to the host console on background threads. The
     // child closing stdout/stderr (on exit) makes readNative return 0 (EOF).
@@ -204,5 +280,6 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
     errRead->hostCloseForEof();
     if (tOut.joinable()) tOut.join();
     if (tErr.joinable()) tErr.join();
+    if (tIn.joinable()) tIn.join();
     klog_fmt("ShellSpawn: session complete");
 }
