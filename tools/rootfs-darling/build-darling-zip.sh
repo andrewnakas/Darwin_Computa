@@ -483,6 +483,26 @@ if [ -f "$APP_SRC/build-darwinpad.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M3 (S42): foundationcli — a NORMAL Objective-C Foundation program -------
+# Unlike akapp/darwinpad (which hand-roll objc_msgSend via extern decls + cast-
+# through calls), foundationcli.m is REAL Objective-C ([obj msg], @"literals",
+# @[...], @autoreleasepool), so clang emits the genuine objc_msgSend / class+sel
+# refs / autorelease machinery. Running it validates dyld + libobjc + Foundation
+# through the SAME codegen path every normal Mac tool uses — the M3 milestone.
+# Installed at the guest path /usr/bin/foundationcli. VERIFIED M3/S42 (live):
+# M3-STRING-HELLO, DARWIN / M3-ARRAY-COUNT-3 / M3-JOIN-a-b-c / M3-NUM-42 /
+# M3-PROC-foundationcli / M3-DONE, exit_group(0). Run with
+# BW64_SHELLSPAWN=/usr/bin/foundationcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-foundationcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-foundationcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/foundationcli" ]; then
+            echo "--- M3/S42: staged foundationcli at usr/bin/foundationcli ---"
+        fi
+    else
+        echo "WARNING: foundationcli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
