@@ -465,6 +465,24 @@ if [ -f "$APP_SRC/build-akapp.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M1 (S39): DarwinPad.app — a real EDITABLE text editor bundle ------------
+# A TextEdit-style .app: NSWindow + NSScrollView{editable NSTextView} + File/Edit
+# menu bar, installed at the guest path /Applications/DarwinPad.app. Unlike
+# akrun/akapp (which only LOG NSEvents), DarwinPad holds a real mutable text
+# buffer and proves the editing path by READING THE BUFFER BACK after a
+# programmatic insertText:/deleteBackward: (verdict 'DARWINPAD EDIT OK — buffer
+# mutated'). Same bundle-launch mechanism as S38. Launch with
+# tools/run_darling_app_bundle.sh /Applications/DarwinPad.app. See tools/darwin-app/.
+if [ -f "$APP_SRC/build-darwinpad.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-darwinpad.sh" >/dev/null 2>&1; then
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/DarwinPad.app" ]; then
+            echo "--- M1/S39: staged DarwinPad.app at Applications/DarwinPad.app ---"
+        fi
+    else
+        echo "WARNING: darwinpad bundle build failed; DarwinPad.app not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs

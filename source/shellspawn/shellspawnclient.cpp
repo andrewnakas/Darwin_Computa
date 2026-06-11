@@ -130,6 +130,25 @@ void ShellSpawnClient::driveSession(std::shared_ptr<KUnixSocketObject> listenSoc
         std::vector<U8> m = buildCmd(SHELLSPAWN_ADDARG, arg0.c_str(), (U16)(arg0.size() + 1));
         client->hostSendBytes(m.data(), (U32)m.size());
     }
+    // 2b) Optional SETENV "<KEY=VALUE>\0" pairs, from host BW64_SPAWN_ENV
+    //     (';'-separated, e.g. "OBJC_PRINT_INITIALIZE_METHODS=YES;FOO=bar").
+    //     Lets us inject diagnostics (objc class-init tracing) or any env into the
+    //     spawned Darwin app without rebuilding it. Default unset = no-op.
+    if (const char* spawnEnv = std::getenv("BW64_SPAWN_ENV")) {
+        std::string all(spawnEnv);
+        size_t start = 0;
+        while (start <= all.size()) {
+            size_t sep = all.find(';', start);
+            std::string pair = all.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+            if (!pair.empty()) {
+                std::vector<U8> m = buildCmd(SHELLSPAWN_SETENV, pair.c_str(), (U16)(pair.size() + 1));
+                client->hostSendBytes(m.data(), (U32)m.size());
+                klog_fmt("ShellSpawn: SETENV '%s'", pair.c_str());
+            }
+            if (sep == std::string::npos) break;
+            start = sep + 1;
+        }
+    }
     // 3) GO with the 3 stdio fds via SCM_RIGHTS {stdin, stdout, stderr}.
     {
         std::vector<U8> m = buildCmd(SHELLSPAWN_GO, nullptr, 0);
