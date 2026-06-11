@@ -32,6 +32,7 @@
 #include "cpu64.h"
 #include "kmemory64.h"
 #include "../x11wire/xwirepresent.h"
+#include "../x11wire/xwireserver.h"
 
 #include <SDL.h>
 #ifdef __EMSCRIPTEN__
@@ -349,6 +350,20 @@ void readbackAndPresent() {
     g_xwirePresentSink->onWindowMapped(g_currentDrawable, (U16)w, (U16)h);
     g_xwirePresentSink->submitFrame(g_currentDrawable, (U16)w, (U16)h,
                                     g_bgrx.data(), (U32)w * 4);
+
+    // Claim the XWire present window for the GL path. On the wine path the
+    // first PutImage picks it, but a GL-only client (Darling's AppKit — its
+    // window content arrives exclusively through this readback) never sends
+    // PutImage, and with presentWindow unset deliverInputEvents() drops all
+    // host input on the floor — the app presents fine but is deaf.
+    {
+        XWireServer& srv = XWireServer::instance();
+        std::lock_guard<std::mutex> lk(srv.regMutex);
+        if (srv.presentWindow == 0 && srv.windows.count(g_currentDrawable)) {
+            srv.presentWindow = g_currentDrawable;
+            klog_fmt("gl64: claimed presentWindow=0x%x (GL-only client)", g_currentDrawable);
+        }
+    }
 }
 
 // --- argument decoders ------------------------------------------------------

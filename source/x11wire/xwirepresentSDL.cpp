@@ -308,6 +308,28 @@ public:
                 uint32_t px = *(const uint32_t*)frame.data();
                 klog_fmt("XWire SDL: presented %dx%d topleft=0x%08x", (int)fw, (int)fh, px);
             }
+            if (!firstFrameSeen) { firstFrameSeen = true; firstFrameTick = SDL_GetTicks(); }
+        }
+
+        // BW64_FAKEINPUT (default-off test instrument): ~5s after the first
+        // presented frame, inject one synthetic mouse click + one 'a' keypress
+        // into the input queue — exactly what a real SDL event would enqueue.
+        // Lets an autonomous run prove the whole input path (XWire ButtonPress/
+        // KeyPress -> the AppKit backend's X11 event source -> NSEvent) without
+        // a human at the host window. Fires once per process.
+        if (firstFrameSeen && !fakeInputDone && getenv("BW64_FAKEINPUT") &&
+            SDL_GetTicks() - firstFrameTick > 5000) {
+            fakeInputDone = true;
+            int cx = shownW ? shownW / 2 : 240, cy = shownH ? shownH / 2 : 170;
+            lastX = cx; lastY = cy;
+            XWireInputEvent ie;
+            ie.x = cx; ie.y = cy; ie.state = 0;
+            ie.type = XWireInputEvent::EvMotion;     ie.detail = 0;  push(ie);
+            ie.type = XWireInputEvent::EvButtonDown; ie.detail = 1;  push(ie);
+            ie.type = XWireInputEvent::EvButtonUp;   ie.detail = 1;  push(ie);
+            ie.type = XWireInputEvent::EvKeyDown;    ie.detail = 38; push(ie); // 'a'
+            ie.type = XWireInputEvent::EvKeyUp;      ie.detail = 38; push(ie);
+            klog_fmt("XWire SDL: FAKEINPUT injected click@(%d,%d) + key 'a'", cx, cy);
         }
 
         // NOTE: we do NOT SDL_PollEvent here. BoxedWine's own input layer
@@ -382,6 +404,9 @@ private:
     int lastX = 0, lastY = 0;
     uint16_t shownW = 0, shownH = 0;     // last size pushed to the host screen
     bool loadingShown = false;           // loading-screen window sized/shown once
+    bool firstFrameSeen = false;         // a real guest frame has been presented
+    uint32_t firstFrameTick = 0;         // SDL_GetTicks at first frame (FAKEINPUT timer)
+    bool fakeInputDone = false;          // BW64_FAKEINPUT fired (once per process)
     int lastShownPct = -1, creep = 0;    // loading-bar anti-freeze jitter
     std::atomic<bool> inputPending{false}; // lock-free "queue non-empty" flag
 };
