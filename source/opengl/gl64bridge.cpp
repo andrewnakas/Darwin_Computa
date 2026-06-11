@@ -363,6 +363,91 @@ void readFloats(CPU64* cpu, U64 guestAddr, float* out, int count) {
     cpu->memory->memcpyFromGuest(out, guestAddr, (U64)count * 4);
 }
 
+// Bytes per pixel for the glTexImage2D format/type pairs the Darling present
+// path (and simple GL apps) use. Packed types encode the whole pixel.
+U32 texelBytes(U32 format, U32 type) {
+    U32 comps;
+    switch (format) {
+        case 0x1907 /*GL_RGB*/: case 0x80E0 /*GL_BGR*/: comps = 3; break;
+        case 0x1908 /*GL_RGBA*/: case 0x80E1 /*GL_BGRA*/: comps = 4; break;
+        case 0x1909 /*GL_LUMINANCE*/: case 0x1906 /*GL_ALPHA*/:
+        case 0x1902 /*GL_DEPTH_COMPONENT*/: case 0x1903 /*GL_RED*/: comps = 1; break;
+        case 0x190A /*GL_LUMINANCE_ALPHA*/: comps = 2; break;
+        default: comps = 4; break;
+    }
+    switch (type) {
+        case 0x1401 /*GL_UNSIGNED_BYTE*/: case 0x1400 /*GL_BYTE*/: return comps;
+        case 0x1403 /*GL_UNSIGNED_SHORT*/: case 0x1402 /*GL_SHORT*/: return comps * 2;
+        case 0x1405 /*GL_UNSIGNED_INT*/: case 0x1404 /*GL_INT*/:
+        case 0x1406 /*GL_FLOAT*/: return comps * 4;
+        case 0x8035 /*GL_UNSIGNED_INT_8_8_8_8*/:
+        case 0x8367 /*GL_UNSIGNED_INT_8_8_8_8_REV*/:
+        case 0x8368 /*GL_UNSIGNED_INT_2_10_10_10_REV*/: return 4;
+        case 0x8363 /*GL_UNSIGNED_SHORT_5_6_5*/:
+        case 0x8033 /*GL_UNSIGNED_SHORT_4_4_4_4*/:
+        case 0x8034 /*GL_UNSIGNED_SHORT_5_5_5_1*/: return 2;
+        default: return comps;
+    }
+}
+
+// Read a whole texture image out of guest memory (honoring the default 4-byte
+// unpack row alignment) into a host scratch buffer.
+std::vector<U8> g_texScratch;
+const U8* readTexImage(CPU64* cpu, U64 guestAddr, U32 w, U32 h, U32 format, U32 type) {
+    if (!guestAddr || !w || !h) return nullptr;
+    U32 bpp = texelBytes(format, type);
+    U32 row = w * bpp;
+    if (bpp != 4 && (row & 3)) row = (row + 3) & ~3u;   // GL_UNPACK_ALIGNMENT=4
+    size_t total = (size_t)row * h;
+    g_texScratch.resize(total);
+    cpu->memory->memcpyFromGuest(g_texScratch.data(), guestAddr, (U64)total);
+    return g_texScratch.data();
+}
+
+// Client vertex-array capture. gl*Pointer hands us GUEST addresses that GL
+// would read lazily at draw time — so we record them and copy the data to host
+// scratch at glDrawArrays. One slot per array kind (QuartzCore's renderSurface
+// uses vertex + texcoord, stride 0, GL_FLOAT).
+struct CapturedArray {
+    bool enabled = false;
+    U32 size = 4, type = 0x1406 /*GL_FLOAT*/, stride = 0;
+    U64 guestPtr = 0;
+    std::vector<U8> host;
+};
+CapturedArray g_vertexArr, g_texCoordArr, g_colorArr, g_normalArr;
+
+CapturedArray* arrayForClientState(U32 array) {
+    switch (array) {
+        case 0x8074 /*GL_VERTEX_ARRAY*/:        return &g_vertexArr;
+        case 0x8078 /*GL_TEXTURE_COORD_ARRAY*/: return &g_texCoordArr;
+        case 0x8076 /*GL_COLOR_ARRAY*/:         return &g_colorArr;
+        case 0x8075 /*GL_NORMAL_ARRAY*/:        return &g_normalArr;
+        default: return nullptr;
+    }
+}
+
+U32 glTypeBytes(U32 type) {
+    switch (type) {
+        case 0x1400: case 0x1401: return 1;          // BYTE/UNSIGNED_BYTE
+        case 0x1402: case 0x1403: return 2;          // SHORT/UNSIGNED_SHORT
+        case 0x1404: case 0x1405: case 0x1406: return 4; // INT/UINT/FLOAT
+        case 0x140A: return 8;                       // DOUBLE
+        default: return 4;
+    }
+}
+
+// Pull `vertexCount` elements of a captured array from guest memory and point
+// host GL at the copy. Returns the host pointer (or null when disabled/unset).
+const U8* materializeArray(CPU64* cpu, CapturedArray& arr, U32 vertexCount) {
+    if (!arr.enabled || !arr.guestPtr || !vertexCount) return nullptr;
+    U32 elem = arr.size * glTypeBytes(arr.type);
+    U32 stride = arr.stride ? arr.stride : elem;
+    size_t total = (size_t)stride * (vertexCount - 1) + elem;
+    arr.host.resize(total);
+    cpu->memory->memcpyFromGuest(arr.host.data(), arr.guestPtr, (U64)total);
+    return arr.host.data();
+}
+
 } // namespace
 
 U64 gl64Bridge(CPU64* cpu, U64 fnId, U64 argsAddr) {
@@ -373,10 +458,6 @@ U64 gl64Bridge(CPU64* cpu, U64 fnId, U64 argsAddr) {
     // GLTRACE line ever prints, the guest-side GL dll is NOT the gl64 build —
     // it's trying the stock GLX path the wire server doesn't implement, so it
     // never gets here. First hit + per-id-once keeps it cheap.
-    // TEMP DIAGNOSTIC: log EVERY trap unconditionally (BW64_GLTRACE is a HOST env
-    // var we can't set from the browser). Reveals the exact glX/gl call sequence
-    // winex11/glcube make so we can see where GL setup stops. REMOVE before commit.
-    klog_fmt("gl64: trap fnId=%llu", (unsigned long long)fnId);
     if (const char* gt = getenv("BW64_GLTRACE")) {
         static std::atomic<bool> announced{false};
         if (!announced.exchange(true))
@@ -627,6 +708,122 @@ U64 gl64Bridge(CPU64* cpu, U64 fnId, U64 argsAddr) {
         case GL64_fn_glVertex3f:
             if (g_glContext) GL_MT(glVertex3f(af(args,0), af(args,1), af(args,2)));
             return 0;
+
+        // === core GL: textures + client arrays ===========================
+        // The Darling AppKit present path (QuartzCore CAWindowOpenGLContext
+        // renderSurface:) uploads the window's software-rendered surface as a
+        // BGRA texture and draws one GL_TRIANGLE_STRIP quad per flush.
+        case GL64_fn_glGenTextures: {
+            U32 n = (U32)ai(args,0);
+            if (ensureContext() && args.a[1] && n) {
+                if (n > 256) n = 256;
+                GLuint ids[256];
+                GL_MT(glGenTextures((GLsizei)n, ids));
+                cpu->memory->memcpyToGuest(args.a[1], ids, (U64)n * sizeof(GLuint));
+            }
+            return 0;
+        }
+        case GL64_fn_glDeleteTextures: {
+            U32 n = (U32)ai(args,0);
+            if (g_glContext && args.a[1] && n) {
+                if (n > 256) n = 256;
+                GLuint ids[256];
+                cpu->memory->memcpyFromGuest(ids, args.a[1], (U64)n * sizeof(GLuint));
+                GL_MT(glDeleteTextures((GLsizei)n, ids));
+            }
+            return 0;
+        }
+        case GL64_fn_glBindTexture:
+            if (ensureContext()) GL_MT(glBindTexture((GLenum)ai(args,0), (GLuint)ai(args,1)));
+            return 0;
+        case GL64_fn_glIsTexture: {
+            if (!g_glContext) return 0;
+            U64 r = 0;
+            GL_MT(r = glIsTexture((GLuint)ai(args,0)));
+            return r;
+        }
+        case GL64_fn_glTexImage2D: {
+            if (!ensureContext()) return 0;
+            U32 w = (U32)ai(args,3), h = (U32)ai(args,4);
+            const U8* pix = readTexImage(cpu, args.a[8], w, h, (U32)ai(args,6), (U32)ai(args,7));
+            GL_MT(glTexImage2D((GLenum)ai(args,0), (GLint)ai(args,1), (GLint)ai(args,2),
+                               (GLsizei)w, (GLsizei)h, (GLint)ai(args,5),
+                               (GLenum)ai(args,6), (GLenum)ai(args,7), pix));
+            return 0;
+        }
+        case GL64_fn_glTexSubImage2D: {
+            if (!g_glContext) return 0;
+            U32 w = (U32)ai(args,4), h = (U32)ai(args,5);
+            const U8* pix = readTexImage(cpu, args.a[8], w, h, (U32)ai(args,6), (U32)ai(args,7));
+            if (pix) GL_MT(glTexSubImage2D((GLenum)ai(args,0), (GLint)ai(args,1),
+                               (GLint)ai(args,2), (GLint)ai(args,3),
+                               (GLsizei)w, (GLsizei)h,
+                               (GLenum)ai(args,6), (GLenum)ai(args,7), pix));
+            return 0;
+        }
+        case GL64_fn_glTexParameteri:
+            if (g_glContext) GL_MT(glTexParameteri((GLenum)ai(args,0), (GLenum)ai(args,1), (GLint)ai(args,2)));
+            return 0;
+        case GL64_fn_glTexEnvf:
+            if (g_glContext) GL_MT(glTexEnvf((GLenum)ai(args,0), (GLenum)ai(args,1), af(args,2)));
+            return 0;
+        case GL64_fn_glAlphaFunc:
+            if (g_glContext) GL_MT(glAlphaFunc((GLenum)ai(args,0), af(args,1)));
+            return 0;
+        case GL64_fn_glBlendFunc:
+            if (g_glContext) GL_MT(glBlendFunc((GLenum)ai(args,0), (GLenum)ai(args,1)));
+            return 0;
+        case GL64_fn_glPixelStorei:
+            if (g_glContext) GL_MT(glPixelStorei((GLenum)ai(args,0), (GLint)ai(args,1)));
+            return 0;
+        case GL64_fn_glEnableClientState: {
+            if (CapturedArray* arr = arrayForClientState((U32)ai(args,0))) arr->enabled = true;
+            if (g_glContext) GL_MT(glEnableClientState((GLenum)ai(args,0)));
+            return 0;
+        }
+        case GL64_fn_glDisableClientState: {
+            if (CapturedArray* arr = arrayForClientState((U32)ai(args,0))) arr->enabled = false;
+            if (g_glContext) GL_MT(glDisableClientState((GLenum)ai(args,0)));
+            return 0;
+        }
+        case GL64_fn_glVertexPointer:
+            g_vertexArr.size = (U32)ai(args,0); g_vertexArr.type = (U32)ai(args,1);
+            g_vertexArr.stride = (U32)ai(args,2); g_vertexArr.guestPtr = args.a[3];
+            return 0;
+        case GL64_fn_glTexCoordPointer:
+            g_texCoordArr.size = (U32)ai(args,0); g_texCoordArr.type = (U32)ai(args,1);
+            g_texCoordArr.stride = (U32)ai(args,2); g_texCoordArr.guestPtr = args.a[3];
+            return 0;
+        case GL64_fn_glColorPointer:
+            g_colorArr.size = (U32)ai(args,0); g_colorArr.type = (U32)ai(args,1);
+            g_colorArr.stride = (U32)ai(args,2); g_colorArr.guestPtr = args.a[3];
+            return 0;
+        case GL64_fn_glNormalPointer:
+            g_normalArr.size = 3; g_normalArr.type = (U32)ai(args,0);
+            g_normalArr.stride = (U32)ai(args,1); g_normalArr.guestPtr = args.a[2];
+            return 0;
+        case GL64_fn_glDrawArrays: {
+            if (!g_glContext) return 0;
+            U32 mode = (U32)ai(args,0);
+            U32 first = (U32)ai(args,1);
+            U32 count = (U32)ai(args,2);
+            if (!count || count > 1000000) return 0;
+            // Copy the guest arrays (gl*Pointer captured only the addresses) and
+            // aim host GL at the copies before drawing.
+            U32 total = first + count;
+            const U8* v = materializeArray(cpu, g_vertexArr, total);
+            const U8* t = materializeArray(cpu, g_texCoordArr, total);
+            const U8* c = materializeArray(cpu, g_colorArr, total);
+            const U8* n = materializeArray(cpu, g_normalArr, total);
+            GL_MT({
+                if (v) glVertexPointer((GLint)g_vertexArr.size, (GLenum)g_vertexArr.type, (GLsizei)g_vertexArr.stride, v);
+                if (t) glTexCoordPointer((GLint)g_texCoordArr.size, (GLenum)g_texCoordArr.type, (GLsizei)g_texCoordArr.stride, t);
+                if (c) glColorPointer((GLint)g_colorArr.size, (GLenum)g_colorArr.type, (GLsizei)g_colorArr.stride, c);
+                if (n) glNormalPointer((GLenum)g_normalArr.type, (GLsizei)g_normalArr.stride, n);
+                glDrawArrays((GLenum)mode, (GLint)first, (GLsizei)count);
+            });
+            return 0;
+        }
 
         default:
             klog_fmt("gl64: unimplemented fn id %llu", (unsigned long long)fnId);

@@ -111,7 +111,26 @@ enum {
     GL64_fn_glBegin = 320,
     GL64_fn_glEnd,
     GL64_fn_glVertex2f,
-    GL64_fn_glVertex3f
+    GL64_fn_glVertex3f,
+
+    GL64_fn_glGenTextures = 360,
+    GL64_fn_glDeleteTextures,
+    GL64_fn_glBindTexture,
+    GL64_fn_glIsTexture,
+    GL64_fn_glTexImage2D,
+    GL64_fn_glTexSubImage2D,
+    GL64_fn_glTexParameteri,
+    GL64_fn_glTexEnvf,
+    GL64_fn_glAlphaFunc,
+    GL64_fn_glBlendFunc,
+    GL64_fn_glPixelStorei,
+    GL64_fn_glEnableClientState,
+    GL64_fn_glDisableClientState,
+    GL64_fn_glVertexPointer,
+    GL64_fn_glTexCoordPointer,
+    GL64_fn_glColorPointer,
+    GL64_fn_glNormalPointer,
+    GL64_fn_glDrawArrays
 };
 
 // ---- the trap ---------------------------------------------------------------
@@ -171,6 +190,13 @@ typedef struct _XDisplay Display;
 typedef struct { void* visual; XID visualid; int screen; int depth; int c_class;
                  unsigned long red_mask, green_mask, blue_mask;
                  int colormap_size; int bits_per_rgb; } XVisualInfo;
+// Xlib's Visual — vi->visual must point at a REAL one: XCreateWindow /
+// XCreateColormap dereference visual->visualid when building the wire request
+// (Darling's Cocotron X11Window passes VisualInfo->visual straight through;
+// a NULL here is a segfault, unlike wine which mostly uses vi->visualid).
+typedef struct { void* ext_data; XID visualid; int c_class;
+                 unsigned long red_mask, green_mask, blue_mask;
+                 int bits_per_rgb; int map_entries; } XlibVisual;
 
 // ===========================================================================
 // GLX entry points
@@ -205,10 +231,17 @@ API const char* glXGetClientString(Display* dpy, int name) {
 API XVisualInfo* glXChooseVisual(Display* dpy, int screen, int* attribList) {
     GL64Args a = {{0}}; a.a[0]=(uint64_t)(uintptr_t)attribList;
     (void)gl64_trap(GL64_fn_glXChooseVisual, &a);
-    // Heap-allocate: wine XFree()s this. (See the malloc note above.)
-    XVisualInfo* vi = (XVisualInfo*)malloc(sizeof(XVisualInfo));
+    // Heap-allocate: wine XFree()s this. (See the malloc note above.) The Visual
+    // rides in the same allocation, after the XVisualInfo — callers keep using
+    // vi->visual after XFree(vi) is UB anyway, and Cocotron frees neither.
+    XVisualInfo* vi = (XVisualInfo*)malloc(sizeof(XVisualInfo) + sizeof(XlibVisual));
     if (!vi) return 0;
-    memset(vi, 0, sizeof(*vi));
+    memset(vi, 0, sizeof(XVisualInfo) + sizeof(XlibVisual));
+    XlibVisual* vis = (XlibVisual*)(vi + 1);
+    vis->visualid = 0x21; vis->c_class = 4 /*TrueColor*/;
+    vis->red_mask = 0xff0000; vis->green_mask = 0x00ff00; vis->blue_mask = 0x0000ff;
+    vis->bits_per_rgb = 8; vis->map_entries = 256;
+    vi->visual = vis;
     vi->depth = 24; vi->c_class = 4 /*TrueColor*/; vi->bits_per_rgb = 8;
     vi->red_mask = 0xff0000; vi->green_mask = 0x00ff00; vi->blue_mask = 0x0000ff;
     vi->visualid = 0x21; vi->colormap_size = 256;
@@ -381,6 +414,59 @@ API void glVertex2f(GLfloat x,GLfloat y){ GL64Args a={{0}}; a.a[0]=F2U(x);a.a[1]
 API void glVertex3f(GLfloat x,GLfloat y,GLfloat z){ GL64Args a={{0}}; a.a[0]=F2U(x);a.a[1]=F2U(y);a.a[2]=F2U(z); (void)gl64_trap(GL64_fn_glVertex3f,&a); }
 
 // ===========================================================================
+// textures + client arrays — the Darling AppKit window present path (QuartzCore
+// CAWindowOpenGLContext renderSurface: does a BGRA glTexImage2D upload + one
+// glDrawArrays(GL_TRIANGLE_STRIP) quad per window flush).
+// ===========================================================================
+typedef unsigned int GLuint;
+
+API void glGenTextures(GLsizei n, GLuint* ids){ GL64Args a={{0}}; a.a[0]=(uint64_t)(uint32_t)n; a.a[1]=(uint64_t)(uintptr_t)ids; (void)gl64_trap(GL64_fn_glGenTextures,&a); }
+API void glDeleteTextures(GLsizei n, const GLuint* ids){ GL64Args a={{0}}; a.a[0]=(uint64_t)(uint32_t)n; a.a[1]=(uint64_t)(uintptr_t)ids; (void)gl64_trap(GL64_fn_glDeleteTextures,&a); }
+API void glBindTexture(GLenum target, GLuint id){ GL64Args a={{0}}; a.a[0]=target; a.a[1]=id; (void)gl64_trap(GL64_fn_glBindTexture,&a); }
+API GLboolean glIsTexture(GLuint id){ GL64Args a={{0}}; a.a[0]=id; return (GLboolean)gl64_trap(GL64_fn_glIsTexture,&a); }
+API void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei w, GLsizei h,
+                      GLint border, GLenum format, GLenum type, const GLvoid* pixels){
+    GL64Args a={{0}}; a.a[0]=target; a.a[1]=(uint64_t)(uint32_t)level; a.a[2]=(uint64_t)(uint32_t)internalformat;
+    a.a[3]=(uint64_t)(uint32_t)w; a.a[4]=(uint64_t)(uint32_t)h; a.a[5]=(uint64_t)(uint32_t)border;
+    a.a[6]=format; a.a[7]=type; a.a[8]=(uint64_t)(uintptr_t)pixels;
+    (void)gl64_trap(GL64_fn_glTexImage2D,&a);
+}
+API void glTexSubImage2D(GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h,
+                         GLenum format, GLenum type, const GLvoid* pixels){
+    GL64Args a={{0}}; a.a[0]=target; a.a[1]=(uint64_t)(uint32_t)level; a.a[2]=(uint64_t)(uint32_t)x;
+    a.a[3]=(uint64_t)(uint32_t)y; a.a[4]=(uint64_t)(uint32_t)w; a.a[5]=(uint64_t)(uint32_t)h;
+    a.a[6]=format; a.a[7]=type; a.a[8]=(uint64_t)(uintptr_t)pixels;
+    (void)gl64_trap(GL64_fn_glTexSubImage2D,&a);
+}
+API void glTexParameteri(GLenum target, GLenum pname, GLint param){ GL64Args a={{0}}; a.a[0]=target; a.a[1]=pname; a.a[2]=(uint64_t)(uint32_t)param; (void)gl64_trap(GL64_fn_glTexParameteri,&a); }
+API void glTexEnvf(GLenum target, GLenum pname, GLfloat param){ GL64Args a={{0}}; a.a[0]=target; a.a[1]=pname; a.a[2]=F2U(param); (void)gl64_trap(GL64_fn_glTexEnvf,&a); }
+API void glAlphaFunc(GLenum func, GLclampf ref){ GL64Args a={{0}}; a.a[0]=func; a.a[1]=F2U(ref); (void)gl64_trap(GL64_fn_glAlphaFunc,&a); }
+API void glBlendFunc(GLenum sfactor, GLenum dfactor){ GL64Args a={{0}}; a.a[0]=sfactor; a.a[1]=dfactor; (void)gl64_trap(GL64_fn_glBlendFunc,&a); }
+API void glPixelStorei(GLenum pname, GLint param){ GL64Args a={{0}}; a.a[0]=pname; a.a[1]=(uint64_t)(uint32_t)param; (void)gl64_trap(GL64_fn_glPixelStorei,&a); }
+API void glEnableClientState(GLenum array){ GL64Args a={{0}}; a.a[0]=array; (void)gl64_trap(GL64_fn_glEnableClientState,&a); }
+API void glDisableClientState(GLenum array){ GL64Args a={{0}}; a.a[0]=array; (void)gl64_trap(GL64_fn_glDisableClientState,&a); }
+API void glVertexPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* ptr){
+    GL64Args a={{0}}; a.a[0]=(uint64_t)(uint32_t)size; a.a[1]=type; a.a[2]=(uint64_t)(uint32_t)stride; a.a[3]=(uint64_t)(uintptr_t)ptr;
+    (void)gl64_trap(GL64_fn_glVertexPointer,&a);
+}
+API void glTexCoordPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* ptr){
+    GL64Args a={{0}}; a.a[0]=(uint64_t)(uint32_t)size; a.a[1]=type; a.a[2]=(uint64_t)(uint32_t)stride; a.a[3]=(uint64_t)(uintptr_t)ptr;
+    (void)gl64_trap(GL64_fn_glTexCoordPointer,&a);
+}
+API void glColorPointer(GLint size, GLenum type, GLsizei stride, const GLvoid* ptr){
+    GL64Args a={{0}}; a.a[0]=(uint64_t)(uint32_t)size; a.a[1]=type; a.a[2]=(uint64_t)(uint32_t)stride; a.a[3]=(uint64_t)(uintptr_t)ptr;
+    (void)gl64_trap(GL64_fn_glColorPointer,&a);
+}
+API void glNormalPointer(GLenum type, GLsizei stride, const GLvoid* ptr){
+    GL64Args a={{0}}; a.a[0]=type; a.a[1]=(uint64_t)(uint32_t)stride; a.a[2]=(uint64_t)(uintptr_t)ptr;
+    (void)gl64_trap(GL64_fn_glNormalPointer,&a);
+}
+API void glDrawArrays(GLenum mode, GLint first, GLsizei count){
+    GL64Args a={{0}}; a.a[0]=mode; a.a[1]=(uint64_t)(uint32_t)first; a.a[2]=(uint64_t)(uint32_t)count;
+    (void)gl64_trap(GL64_fn_glDrawArrays,&a);
+}
+
+// ===========================================================================
 // glXGetProcAddressARB — opengl32/winex11 resolve every gl*/glX* through here.
 // Return our own wrapper for names we implement, or a harmless no-op stub for
 // the rest (so an unimplemented call is silently ignored rather than crashing).
@@ -410,6 +496,12 @@ static const struct procEntry g_procs[] = {
     E(glMultMatrixf), E(glLightfv), E(glLightf), E(glMaterialfv), E(glMaterialf),
     E(glColorMaterial), E(glNormal3f), E(glBegin), E(glEnd), E(glVertex2f),
     E(glVertex3f),
+    E(glGenTextures), E(glDeleteTextures), E(glBindTexture), E(glIsTexture),
+    E(glTexImage2D), E(glTexSubImage2D), E(glTexParameteri), E(glTexEnvf),
+    E(glAlphaFunc), E(glBlendFunc), E(glPixelStorei),
+    E(glEnableClientState), E(glDisableClientState),
+    E(glVertexPointer), E(glTexCoordPointer), E(glColorPointer),
+    E(glNormalPointer), E(glDrawArrays),
 };
 #undef E
 #define NPROCS (sizeof(g_procs)/sizeof(g_procs[0]))

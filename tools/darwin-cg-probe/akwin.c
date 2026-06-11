@@ -107,6 +107,15 @@ int main(int argc, char** argv) {
         if (title) ((void(*)(id,SEL,id))objc_msgSend)(win, S("setTitle:"), title);
     }
 
+    /* S36: a DISTINCTIVE background so the presented frame is provable — the
+     * present sink logs the top-left pixel (BW64_XWIRE 'presented ... topleft=');
+     * red == 0x00ff0000 in the BGRX frame. */
+    Class NSColor = objc_getClass("NSColor");
+    if (NSColor) {
+        id red = ((id(*)(id,SEL))objc_msgSend)((id)NSColor, S("redColor"));
+        if (red) ((void(*)(id,SEL,id))objc_msgSend)(win, S("setBackgroundColor:"), red);
+    }
+
     /* 3) Order it on-screen — drives -[X11Window ensureMapped] -> XMapWindow. */
     fprintf(stderr, "akwin: makeKeyAndOrderFront: — expect XMapWindow / 'XWire: first window mapped'\n");
     fflush(stderr);
@@ -116,11 +125,21 @@ int main(int argc, char** argv) {
     fprintf(stderr, "akwin: window ordered front; holding to let the wire server present\n");
     fflush(stderr);
 
-    /* Pump a few events + hold so the backend flushes the map to x11wire -> SDL. */
-    for (int i = 0; i < 60; i++) {
-        /* [app nextEventMatchingMask:untilDate:inMode:dequeue:] would need NSDate;
-         * a plain hold is enough to let the backend's own thread map + present. */
-        usleep(100 * 1000); /* 100ms; ~6s total */
+    /* Pump a few events + hold so the backend flushes the map to x11wire -> SDL.
+     * S36: force the draw->flushBuffer cycle explicitly and repeatedly — akwin
+     * doesn't run an NSRunLoop, so without [win display] the window contents
+     * would only flush once (during makeKeyAndOrderFront's display pass). Each
+     * display drives X11Window flushBuffer -> QuartzCore renderSurface (GL
+     * texture upload) -> CGLFlushDrawable (eglSwapBuffers -> host present). */
+    for (int i = 0; i < 300; i++) {
+        if ((i % 20) == 0) {
+            ((void(*)(id,SEL))objc_msgSend)(win, S("display"));
+            if (i == 0) {
+                fprintf(stderr, "akwin: [win display] — expect gl64 texture upload + present\n");
+                fflush(stderr);
+            }
+        }
+        usleep(100 * 1000); /* 100ms; ~30s total */
     }
 
     fprintf(stderr, "akwin: done\n");

@@ -434,6 +434,29 @@ if [ -f "$CGPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- S36: replace Mesa libGL/libEGL with the gl64 trap shims -----------------
+# Darling's AppKit window present path is CGL -> EGL -> Linux libEGL/libGL
+# (QuartzCore CAWindowOpenGLContext renderSurface: + CGLFlushDrawable). Mesa's
+# software EGL needs DRI drivers (swrast = LLVM under emulation) and can never
+# initialize here — akwin died with 'CGL error 10004'. The trap shims
+# (tools/rootfs64/libgl64 + libegl64) forward every gl*/egl* call to the host
+# gl64 bridge, which renders on the host GPU and presents through the X11-wire
+# sink. Staged OVER the Mesa copies at both lib roots (S29 staged those only to
+# satisfy the native-bridge dlopen closure).
+RF64="$(cd "$(dirname "$0")/.." && pwd)/rootfs64"
+bash "$RF64/build-libgl64.sh"  >/dev/null 2>&1 || true
+bash "$RF64/build-libegl64.sh" >/dev/null 2>&1 || true
+if [ -f "$RF64/libgl64/libGL.so.1" ] && [ -f "$RF64/libegl64/libEGL.so.1" ]; then
+    for base in "$STAGEHOST/lib/x86_64-linux-gnu" "$STAGEHOST/usr/lib/x86_64-linux-gnu"; do
+        [ -d "$base" ] || continue
+        cp "$RF64/libgl64/libGL.so.1"  "$base/libGL.so.1"
+        cp "$RF64/libegl64/libEGL.so.1" "$base/libEGL.so.1"
+    done
+    echo "--- S36: staged gl64 trap libGL.so.1 + libEGL.so.1 over Mesa (both lib roots) ---"
+else
+    echo "WARNING: gl64 trap shims missing; Mesa libGL/libEGL left in place (no GUI pixels)." >&2
+fi
+
 echo "=== zipping on host (preserves symlinks) ==="
 rm -f "$DIST/glibc-rootfs64.zip" "$DIST/darling.zip"
 # Base: glibc + Linux deps. Overlay: mldr + the Darwin prefix.

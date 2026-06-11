@@ -133,6 +133,28 @@ enum {
     GL64_fn_glVertex2f,                 // (x,y : float)
     GL64_fn_glVertex3f,                 // (x,y,z : float)
 
+    // --- core GL: textures + client arrays (Darling QuartzCore
+    // CAWindowOpenGLContext renderSurface: — the AppKit window present path:
+    // glTexImage2D(BGRA) upload + a glDrawArrays(GL_TRIANGLE_STRIP) quad) -----
+    GL64_fn_glGenTextures = 360,        // (n, out ids*)
+    GL64_fn_glDeleteTextures,           // (n, ids*)
+    GL64_fn_glBindTexture,              // (target, id)
+    GL64_fn_glIsTexture,                // (id) -> GLboolean
+    GL64_fn_glTexImage2D,               // (target, level, internalfmt, w, h, border, fmt, type, pixels*)
+    GL64_fn_glTexSubImage2D,            // (target, level, x, y, w, h, fmt, type, pixels*)
+    GL64_fn_glTexParameteri,            // (target, pname, param)
+    GL64_fn_glTexEnvf,                  // (target, pname, param : float)
+    GL64_fn_glAlphaFunc,                // (func, ref : float)
+    GL64_fn_glBlendFunc,                // (sfactor, dfactor)
+    GL64_fn_glPixelStorei,              // (pname, param)
+    GL64_fn_glEnableClientState,        // (array)
+    GL64_fn_glDisableClientState,       // (array)
+    GL64_fn_glVertexPointer,            // (size, type, stride, ptr* — captured, read at draw)
+    GL64_fn_glTexCoordPointer,          // (size, type, stride, ptr*)
+    GL64_fn_glColorPointer,             // (size, type, stride, ptr*)
+    GL64_fn_glNormalPointer,            // (type, stride, ptr*)
+    GL64_fn_glDrawArrays,               // (mode, first, count)
+
     GL64_fn__MAX
 };
 
