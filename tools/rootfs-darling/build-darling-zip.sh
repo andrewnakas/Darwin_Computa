@@ -434,6 +434,26 @@ if [ -f "$CGPROBE_SRC/build.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- S37: X11 locale/compose data (libx11-data) ------------------------------
+# Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
+# (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
+# /usr/share/X11/locale/{locale.dir,compose.dir,<locale>/...}; without them XIM
+# init fails and typed keys carry NO characters (typing is dead even though
+# KeyDown events arrive). Bare Linux path — the native-bridge libX11 resolves
+# bare paths, not vchroot-prefixed ones (same rule as the S31 fontconfig fix).
+X11DATA_DEB="https://ftp.debian.org/debian/pool/main/libx/libx11/libx11-data_1.8.4-2+deb12u2_all.deb"
+if [ ! -d "$STAGEHOST/usr/share/X11/locale" ]; then
+    X11TMP="$(mktemp -d)"
+    if curl -sL -o "$X11TMP/d.deb" "$X11DATA_DEB" && (cd "$X11TMP" && ar x d.deb && tar xf data.tar.xz); then
+        mkdir -p "$STAGEHOST/usr/share/X11"
+        cp -R "$X11TMP/usr/share/X11/locale" "$STAGEHOST/usr/share/X11/locale"
+        echo "--- S37: staged /usr/share/X11/locale (XIM/compose data for typing) ---"
+    else
+        echo "WARNING: libx11-data fetch failed; AppKit typing will produce no characters." >&2
+    fi
+    rm -rf "$X11TMP"
+fi
+
 # --- S36: replace Mesa libGL/libEGL with the gl64 trap shims -----------------
 # Darling's AppKit window present path is CGL -> EGL -> Linux libEGL/libGL
 # (QuartzCore CAWindowOpenGLContext renderSurface: + CGLFlushDrawable). Mesa's

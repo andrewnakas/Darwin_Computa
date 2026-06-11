@@ -33,9 +33,16 @@
 typedef void* id;
 typedef void* Class;
 typedef void* SEL;
+typedef id (*IMP)(id, SEL, ...);
 extern id   objc_getClass(const char* name);
 extern SEL  sel_registerName(const char* name);
 extern id objc_msgSend(id self, SEL op, ...);
+/* Runtime class creation — lets this header-less probe own a target/action
+ * method (the button click handler) without compiling ObjC. */
+extern Class objc_allocateClassPair(Class superclass, const char* name, unsigned long extraBytes);
+extern void  objc_registerClassPair(Class cls);
+extern unsigned char class_addMethod(Class cls, SEL name, IMP imp, const char* types);
+extern const char* object_getClassName(id obj);
 
 typedef double CGFloat;
 typedef struct { CGFloat x, y; } CGPoint;
@@ -52,6 +59,28 @@ enum { NSApplicationActivationPolicyRegular = 0 };
 #define NSAnyEventMask 0xffffffffffffffffUL
 
 static SEL S(const char* n) { return sel_registerName(n); }
+
+/* ---- the button's target (runtime-created class) -------------------------
+ * Clicking the NSButton fires -[AkTarget bump:]: toggle the window background
+ * red<->blue and log — VISIBLE proof that a click traveled host SDL -> X11
+ * wire -> AppKit -> NSButton hit-test -> target/action. */
+static id g_win = 0;
+static id g_btn = 0;
+static long g_clicks = 0;
+
+static id ak_bump(id self, SEL _cmd, id sender) {
+    g_clicks++;
+    fprintf(stderr, "akrun: BUTTON CLICKED! (count=%ld) — toggling background\n", g_clicks);
+    fflush(stderr);
+    Class NSColor = objc_getClass("NSColor");
+    if (NSColor && g_win) {
+        id c = ((id(*)(id,SEL))objc_msgSend)((id)NSColor,
+                S((g_clicks & 1) ? "blueColor" : "redColor"));
+        if (c) ((void(*)(id,SEL,id))objc_msgSend)(g_win, S("setBackgroundColor:"), c);
+        ((void(*)(id,SEL))objc_msgSend)(g_win, S("display"));
+    }
+    return 0;
+}
 
 int main(int argc, char** argv) {
     fprintf(stderr, "akrun: starting; DISPLAY=%s\n", getenv("DISPLAY") ? getenv("DISPLAY") : "(unset)");
@@ -86,6 +115,53 @@ int main(int argc, char** argv) {
         if (red) ((void(*)(id,SEL,id))objc_msgSend)(win, S("setBackgroundColor:"), red);
     }
 
+    /* S37: real controls. A button that toggles the background color when
+     * clicked (target/action through a runtime-created class) and a text field
+     * to type into — the window visibly RESPONDS to input. */
+    g_win = win;
+    id content = ((id(*)(id,SEL))objc_msgSend)(win, S("contentView"));
+    Class NSObject = objc_getClass("NSObject");
+    Class AkTarget = objc_allocateClassPair(NSObject, "AkTarget", 0);
+    id target = 0;
+    if (AkTarget) {
+        class_addMethod(AkTarget, S("bump:"), (IMP)ak_bump, "@@:@");
+        objc_registerClassPair(AkTarget);
+        target = ((id(*)(id,SEL))objc_msgSend)((id)AkTarget, S("new"));
+    }
+    Class NSButton = objc_getClass("NSButton");
+    if (NSButton && content) {
+        id btn = ((id(*)(id,SEL))objc_msgSend)((id)NSButton, S("alloc"));
+        CGRect bf = { { 160.0, 140.0 }, { 160.0, 40.0 } };
+        btn = ((id(*)(id,SEL,CGRect))objc_msgSend)(btn, S("initWithFrame:"), bf);
+        if (btn) {
+            if (NSString) {
+                id bt = ((id(*)(id,SEL,const char*))objc_msgSend)((id)NSString, S("stringWithUTF8String:"), "Click me!");
+                if (bt) ((void(*)(id,SEL,id))objc_msgSend)(btn, S("setTitle:"), bt);
+            }
+            if (target) {
+                ((void(*)(id,SEL,id))objc_msgSend)(btn, S("setTarget:"), target);
+                ((void(*)(id,SEL,SEL))objc_msgSend)(btn, S("setAction:"), S("bump:"));
+            }
+            ((void(*)(id,SEL,id))objc_msgSend)(content, S("addSubview:"), btn);
+            g_btn = btn;
+            fprintf(stderr, "akrun: NSButton added (click toggles background)\n"); fflush(stderr);
+        }
+    }
+    Class NSTextField = objc_getClass("NSTextField");
+    if (NSTextField && content) {
+        id tf = ((id(*)(id,SEL))objc_msgSend)((id)NSTextField, S("alloc"));
+        CGRect tfr = { { 120.0, 80.0 }, { 240.0, 28.0 } };
+        tf = ((id(*)(id,SEL,CGRect))objc_msgSend)(tf, S("initWithFrame:"), tfr);
+        if (tf) {
+            if (NSString) {
+                id ph = ((id(*)(id,SEL,const char*))objc_msgSend)((id)NSString, S("stringWithUTF8String:"), "type here");
+                if (ph) ((void(*)(id,SEL,id))objc_msgSend)(tf, S("setStringValue:"), ph);
+            }
+            ((void(*)(id,SEL,id))objc_msgSend)(content, S("addSubview:"), tf);
+            fprintf(stderr, "akrun: NSTextField added\n"); fflush(stderr);
+        }
+    }
+
     ((void(*)(id,SEL,id))objc_msgSend)(win, S("makeKeyAndOrderFront:"), (id)0);
     ((void(*)(id,SEL,id))objc_msgSend)(app, S("activateIgnoringOtherApps:"), (id)1);
     ((void(*)(id,SEL))objc_msgSend)(win, S("display"));
@@ -106,13 +182,45 @@ int main(int argc, char** argv) {
             long type = ((long(*)(id,SEL))objc_msgSend)(ev, S("type"));
             CGPoint loc = ((CGPoint(*)(id,SEL))objc_msgSend)(ev, S("locationInWindow"));
             events++;
-            fprintf(stderr, "akrun: event type=%ld at (%.0f,%.0f) [#%ld]\n", type, loc.x, loc.y, events);
+            /* S37 diag: which view does this event actually land on? Ground
+             * truth for the click-coordinate translation (X11 top-down y vs
+             * AppKit bottom-up y vs titlebar offset). hitTest: from the frame
+             * view (contentView's superview) covers controls + titlebar. */
+            const char* hitName = "?";
+            id content2 = ((id(*)(id,SEL))objc_msgSend)(win, S("contentView"));
+            id frameView = content2 ? ((id(*)(id,SEL))objc_msgSend)(content2, S("superview")) : 0;
+            if (frameView) {
+                id hit = ((id(*)(id,SEL,CGPoint))objc_msgSend)(frameView, S("hitTest:"), loc);
+                if (hit) hitName = object_getClassName(hit);
+            }
+            /* Key events: log the translated characters — the XIM/XLookupString
+             * verdict. Empty chars on type=10 == the keymap/XIM path is broken. */
+            const char* chars = "";
+            if (type == 10 || type == 11) {
+                id cs = ((id(*)(id,SEL))objc_msgSend)(ev, S("characters"));
+                if (cs) {
+                    const char* u = ((const char*(*)(id,SEL))objc_msgSend)(cs, S("UTF8String"));
+                    if (u) chars = u;
+                }
+            }
+            fprintf(stderr, "akrun: event type=%ld at (%.0f,%.0f) hit=%s chars='%s' [#%ld]\n",
+                    type, loc.x, loc.y, hitName, chars, events);
             fflush(stderr);
             ((void(*)(id,SEL,id))objc_msgSend)(app, S("sendEvent:"), ev);
         }
         n++;
         if ((n % 3) == 0) {
             ((void(*)(id,SEL))objc_msgSend)(win, S("display"));
+        }
+        /* S37 diag: prove the action+redraw path independent of hit-testing —
+         * fire the button programmatically once. The background flipping to
+         * blue ON ITS OWN a few seconds after the window appears == target/
+         * action + setBackgroundColor + display all work; any remaining
+         * deadness is purely click->view coordinate translation. */
+        if (n == 5 && g_btn) {
+            fprintf(stderr, "akrun: performClick: (programmatic) — expect background flip\n");
+            fflush(stderr);
+            ((void(*)(id,SEL,id))objc_msgSend)(g_btn, S("performClick:"), (id)0);
         }
         if ((n % 10) == 0) {
             fprintf(stderr, "akrun: pump alive (waits=%ld events=%ld)\n", n, events);
