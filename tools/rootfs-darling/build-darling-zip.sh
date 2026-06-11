@@ -503,6 +503,28 @@ if [ -f "$APP_SRC/build-foundationcli.sh" ] && command -v clang >/dev/null 2>&1;
     fi
 fi
 
+# --- M4 (S43): netcli — Foundation networking probe -------------------------
+# Proves Darwin's networking on the substrate: the emulator bridges guest
+# AF_INET sockets to REAL host sockets (source/kernel/knativesocket.cpp), and
+# netcli drives the full transport stack — in-guest DNS (getaddrinfo ->
+# resolv.conf 8.8.8.8), TCP connect, and a complete HTTP/1.0 exchange parsed for
+# the status line (the GATE). Installed at /usr/bin/netcli. VERIFIED M4/S43
+# (live, example.com): N4-DNS-<ip> / N4-RAW-CONNECT-OK / N4-RAW-HTTP-828 /
+# N4-RAW-STATUS-200 / N4-RAW-BODY-559 / N4-DONE, exit_group(0). A best-effort
+# CFNetwork tier (NSURLConnection) prints N4-URL-GAP here: this Darling's
+# high-level URL loaders have gaps (NSURLSession missing-selector;
+# NSURLConnection -1015 chunked / -1001 timeout) — recorded as follow-ups, NOT
+# gating. Run: BW64_SHELLSPAWN=/usr/bin/netcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-netcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-netcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/netcli" ]; then
+            echo "--- M4/S43: staged netcli at usr/bin/netcli ---"
+        fi
+    else
+        echo "WARNING: netcli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
