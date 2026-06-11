@@ -114,8 +114,13 @@ void renderLoadingFrame(std::vector<uint8_t>& out, int W, int H,
     const uint32_t BAR_BG = 0xff343448, BAR_FG = 0xff5a9bf0;
     for (int i = 0; i < W*H; i++) fb[i] = BG;
 
-    drawText(fb, W, H, 60, 40, "BOXEDWINE64", FG, 3);
-    drawText(fb, W, H, 60, 72, "Starting Wine, please wait", DIM, 1);
+    if (KSystem::darwinBoot) {
+        drawText(fb, W, H, 60, 40, "DARWIN COMPUTA", FG, 3);
+        drawText(fb, W, H, 60, 72, "Booting the macOS environment (Darling), please wait", DIM, 1);
+    } else {
+        drawText(fb, W, H, 60, 40, "BOXEDWINE64", FG, 3);
+        drawText(fb, W, H, 60, 72, "Starting Wine, please wait", DIM, 1);
+    }
 
     // progress bar
     int bw = W - 120, bh = 22, bx = 60, by = 110;

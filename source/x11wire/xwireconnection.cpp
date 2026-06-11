@@ -442,6 +442,8 @@ void XWireConnection::doHandshake() {
     handshakeDone = true;
     klog_fmt("XWire: handshake complete (vendor=%s root=0x%x visual=0x%x), %d body bytes",
              vendor, rootWindow, rootVisual, (int)body.size());
+    if (KSystem::darwinBoot)
+        KSystem::noteDarwinStage("App connected to the display server…", 85);
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1568,8 @@ void XWireConnection::ensureWindow() {
     windowShown = true;
     klog_fmt("XWire: first window mapped (present sink=%s)",
              g_xwirePresentSink ? "SDL" : "headless");
+    if (KSystem::darwinBoot)
+        KSystem::noteDarwinStage("Window mapped — waiting for the first frame…", 95);
 }
 
 // Decode an X11 PutImage (ZPixmap, TrueColor 24/32bpp) into the target window's

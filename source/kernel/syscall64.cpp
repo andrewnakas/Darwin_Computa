@@ -1167,7 +1167,8 @@ static U64 sys_openat64(CPU64* cpu, U64 dirfd, U64 pathAddr, U64 flags, U64 /*mo
         base = base ? base + 1 : path;
         if (strstr(path, ".dll") || strstr(path, ".exe") ||
             strstr(path, "winex11") || strstr(path, "freetype") ||
-            strstr(path, "fontconfig") || strstr(path, ".so")) {
+            strstr(path, "fontconfig") || strstr(path, ".so") ||
+            strstr(path, ".dylib") || strstr(path, ".framework")) {
             KSystem::noteBootLog(B("Loading ") + BString::copy(base));
         }
     }
@@ -1818,6 +1819,27 @@ static U64 sys_execve64(CPU64* cpu, U64 pathAddr, U64 argvAddr, U64 envpAddr) {
     // the guest paints its real window.
     for (auto& a : args) {
         if (a.contains(".exe")) { KSystem::noteBootStage(a); break; }
+    }
+    // Darwin boot narration: every guest Mach-O launches via mldr with argv0
+    // 'mldr!<real Mach-O path>'. Surface each one as a boot stage so the user
+    // can watch launchd + the daemons come up instead of staring at a bare bar.
+    if (KSystem::darwinBoot && !args.empty() && args[0].contains("mldr!")) {
+        BString a0 = args[0];
+        BString macho = a0.substr(a0.indexOf('!') + 1);
+        int slash = macho.lastIndexOf('/');
+        BString base = (slash >= 0) ? macho.substr(slash + 1) : macho;
+        static int darwinExecCount = 0;
+        darwinExecCount++;
+        const char* shellApp = getenv("BW64_SHELLSPAWN");
+        if (shellApp && base.length() > 2 && BString::copy(shellApp).contains(base)) {
+            KSystem::noteDarwinStage((B("Launching ") + base + "…").c_str(), 80);
+        } else if (base.contains("launchd")) {
+            KSystem::noteDarwinStage("Starting launchd (the macOS init)…", 12);
+        } else {
+            int pct = 15 + darwinExecCount * 5;        // each daemon nudges the bar
+            if (pct > 75) pct = 75;                    // room left for app/display/map
+            KSystem::noteDarwinStage((B("Starting ") + base + "…").c_str(), pct);
+        }
     }
     return (U64)(S64)(S32)cpu->thread->process->execve(cpu->thread, path, args, envs);
 }

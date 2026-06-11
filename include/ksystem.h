@@ -196,6 +196,14 @@ public:
     // Called from sys_execve64 with the basename of each PE the boot chain runs.
     static void noteBootStage(const BString& peName);
 
+    // Darwin (Darling) boot path: true when launched via --darwin-run. Switches
+    // the loading screen's branding/copy and enables the Darwin stage notes.
+    static bool darwinBoot;
+    // Publish a Darwin boot stage (label + percent). Percent only moves forward
+    // (same monotonic rule as noteBootStage) so out-of-order notes can't make
+    // the bar jump backwards.
+    static void noteDarwinStage(const char* label, int pct);
+
     // A rolling log of recent boot activity shown on the loading screen (and so
     // the user can "see what's actually loading"). noteBootLog appends one line;
     // the loading-screen renderer draws the last N. Guarded by bootLogMutex

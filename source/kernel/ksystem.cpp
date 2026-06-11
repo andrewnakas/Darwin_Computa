@@ -103,6 +103,16 @@ std::vector<BString> KSystem::getBootLogTail(int maxLines) {
 // fixed-ish, so a counter -> label table gives believable, always-advancing
 // feedback. `peName` is whatever execve saw (used only to special-case the
 // final app and to ignore the preloader half of each pair).
+bool KSystem::darwinBoot = false;
+
+void KSystem::noteDarwinStage(const char* label, int pct) {
+    if (pct > bootProgressPercent) {
+        bootProgressLabel = BString::copy(label);
+        bootProgressPercent = pct;
+    }
+    noteBootLog(BString::copy(label));
+}
+
 void KSystem::noteBootStage(const BString& peName) {
     static int execCount = 0;
     // Count the wine64 stage exec (not the preloader, which immediately re-execs

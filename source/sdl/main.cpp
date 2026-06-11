@@ -243,6 +243,9 @@ static bool setupDarwinRun(StartUpArgs& a, int argc, const char** argv,
         return false;
     }
     KSystem::darwinMode = true;   // Darling needs uid/gid 0 (darlingserver)
+    KSystem::darwinBoot = true;   // Darwin branding + boot-stage narration
+    KSystem::title = B("Darwin Computa");
+    KSystem::noteDarwinStage("Starting darlingserver…", 3);
 
     BString resourceDir = KNativeSystem::getLocalDirectory();
     BString rf = resourceDir.stringByApppendingPath("rootfs-darling");
