@@ -609,6 +609,23 @@ if [ -f "$APP_SRC/build-sqlitecli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
+# A Foundation data-tier capability on the proven Foundation/ObjC runtime.
+# jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
+# then re-serializes the graph and re-parses it (lossless round-trip). Installed at
+# /usr/bin/jsoncli. VERIFIED M7/S50 (live): M7-PARSE-OK / M7-STR-DARWIN / M7-NUM-42
+# / M7-ARRAY-3 / M7-NESTED-7 / M7-SERIALIZE-66 / M7-ROUNDTRIP-OK / M7-DONE. Run:
+# BW64_SHELLSPAWN=/usr/bin/jsoncli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-jsoncli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-jsoncli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/jsoncli" ]; then
+            echo "--- M7/S50: staged jsoncli at usr/bin/jsoncli ---"
+        fi
+    else
+        echo "WARNING: jsoncli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
