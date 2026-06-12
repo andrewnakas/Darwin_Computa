@@ -643,6 +643,23 @@ if [ -f "$APP_SRC/build-xmlcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M9 (S52): regexcli — regular expressions via NSRegularExpression ----------
+# Text-processing capability on the proven Foundation runtime (the ICU regex
+# engine in-guest). regexcli.m compiles a pattern, counts matches, extracts a
+# CAPTURE GROUP, and does a template REPLACE-ALL (with exact-output check).
+# Installed at /usr/bin/regexcli. VERIFIED M9/S52 (live): M9-COMPILE-OK /
+# M9-COUNT-4 / M9-CAPTURE-42 / M9-REPLACE-OK / M9-DONE. Run:
+# BW64_SHELLSPAWN=/usr/bin/regexcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-regexcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-regexcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/regexcli" ]; then
+            echo "--- M9/S52: staged regexcli at usr/bin/regexcli ---"
+        fi
+    else
+        echo "WARNING: regexcli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
