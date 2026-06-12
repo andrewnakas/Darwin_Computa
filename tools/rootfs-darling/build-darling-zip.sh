@@ -548,6 +548,27 @@ if [ -f "$APP_SRC/build-httpget.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M4c (S45): httpsget — HTTPS/TLS via modern OpenSSL over the socket bridge --
+# M4c proves a real TLS handshake + decoded HTTPS body. The emulator socket bridge
+# is raw TCP only (TLS runs in guest userspace), and Darling's CFNetwork loaders
+# are flaky (see M4b), so httpsget links the staged MODERN OpenSSL
+# (libssl.46/libcrypto.44 => TLS 1.2/1.3 — NOT the libssl.dylib symlink, which is
+# ancient 0.9.8/TLS1.0-only that modern servers reject) and does SSL_connect + SNI
+# over a guest socket, then reuses the M4b chunked decoder. Installed at
+# /usr/bin/httpsget. VERIFIED M4c/S45 (live, https://example.com): M4C-DNS-<ip> /
+# M4C-TCP-OK / M4C-HANDSHAKE-OK-TLSv1.2 / M4C-STATUS-200 / M4C-DECODED-559 /
+# M4C-HASMARKER-1 / M4C-DONE, exit_group(0). Run:
+# BW64_SHELLSPAWN=/usr/bin/httpsget bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-httpsget.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-httpsget.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/httpsget" ]; then
+            echo "--- M4c/S45: staged httpsget at usr/bin/httpsget ---"
+        fi
+    else
+        echo "WARNING: httpsget build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
