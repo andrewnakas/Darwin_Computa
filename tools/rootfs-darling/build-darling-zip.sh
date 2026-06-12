@@ -569,6 +569,27 @@ if [ -f "$APP_SRC/build-httpsget.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M5a (S46-S47): jscli — run real JavaScript through JavaScriptCore ---------
+# JavaScriptCore.framework (the full engine) is staged; jscli.m drives the JSC C
+# API to evaluate real JS and read results back. It was BLOCKED on several
+# emulator gaps that JSC's init + JIT hit, all fixed in the emulator (S47): the
+# WTF StackBounds wall (getrlimit RLIMIT_STACK must be finite 8MB, syscall64.cpp)
+# + a batch of x87 register-form arithmetic and SSE4.1 opcodes (cpu64.cpp:
+# x87 D8/DC FADD/FMUL/FSUB/FDIV; PINSRD/Q, PEXTRD/Q, EXTRACTPS, PBLENDW, PACKUSDW,
+# the PMOVSX/ZX family, and the variable-blend PBLENDVB/BLENDVPS/BLENDVPD).
+# VERIFIED M5a/S47 (live): M5A-EVAL-42 / M5A-STR-DARWIN / M5A-FUNC-120 /
+# M5A-LOOP-4950 / M5A-DONE, exit_group(0). Run:
+# BW64_SHELLSPAWN=/usr/bin/jscli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-jscli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-jscli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/jscli" ]; then
+            echo "--- M5a/S47: staged jscli at usr/bin/jscli ---"
+        fi
+    else
+        echo "WARNING: jscli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs

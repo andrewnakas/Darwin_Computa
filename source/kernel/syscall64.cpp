@@ -923,15 +923,37 @@ static U64 sys_getrandom64(CPU64* cpu, U64 bufAddr, U64 buflen, U64 /*flags*/) {
 #define K_RLIMIT_NOFILE_CUR 10240ULL
 #define K_RLIMIT_NOFILE_MAX 10240ULL
 
+// RLIMIT_STACK (Linux resource #3) MUST also be finite and match the loader's
+// real main-thread stack (loader64.cpp: STACK_SIZE = 8 MB at STACK_TOP
+// 0x7FFFFFFFE000). WebKit's WTF::StackBounds::currentThreadStackBoundsInternal()
+// computes the MAIN thread's stack bound as:
+//     origin = pthread_get_stackaddr_np(self)        // ~0x7FFFFFDFFF00 here
+//     getrlimit(RLIMIT_STACK, &lim); size = lim.rlim_cur
+//     if (size == RLIM_INFINITY) size = 8*MB
+//     bound = origin - size
+// and then asserts isGrowingDownwards() (origin > bound). It uses getrlimit, NOT
+// pthread_get_stacksize_np (which it distrusts for the main thread — and which in
+// our guest correctly returns 8 MB, masking this). Reporting rlim_cur = ~0ULL is
+// dangerous: WTF only special-cases the exact Darwin RLIM_INFINITY sentinel, and
+// if Darling's rlim_t/sentinel doesn't match the raw ~0ULL we write, size stays
+// ~0ULL and bound = origin - ~0ULL wraps ABOVE origin -> isGrowingDownwards()
+// false -> WTFCrash at JSC::initialize() -> JSGlobalContextCreate (the M5a wall).
+// Reporting a real finite 8 MB makes bound a proper downward range either way.
+#define K_RLIMIT_STACK 3
+#define K_RLIMIT_STACK_BYTES (8ULL * 1024 * 1024)
+
 // prlimit64(pid, resource, new_limit*, old_limit*). We don't enforce limits, so
-// we report "no limit" (RLIM64_INFINITY) for everything EXCEPT RLIMIT_NOFILE,
-// which must be finite (see the NOFILE note above).
+// we report "no limit" (RLIM64_INFINITY) for everything EXCEPT RLIMIT_NOFILE and
+// RLIMIT_STACK, which must be finite (see the notes above).
 static U64 sys_prlimit64_64(CPU64* cpu, U64 /*pid*/, U64 res, U64 newLim, U64 oldLim) {
     if (oldLim) {
         // struct rlimit64 { __u64 rlim_cur; __u64 rlim_max; }
         if (res == K_RLIMIT_NOFILE) {
             cpu->memory->writeq(oldLim, K_RLIMIT_NOFILE_CUR);
             cpu->memory->writeq(oldLim + 8, K_RLIMIT_NOFILE_MAX);
+        } else if (res == K_RLIMIT_STACK) {
+            cpu->memory->writeq(oldLim, K_RLIMIT_STACK_BYTES);
+            cpu->memory->writeq(oldLim + 8, K_RLIMIT_STACK_BYTES);
         } else {
             cpu->memory->writeq(oldLim, ~0ULL);
             cpu->memory->writeq(oldLim + 8, ~0ULL);
@@ -5088,6 +5110,12 @@ void ksyscall64(CPU64* cpu) {
                 if (a1 == K_RLIMIT_NOFILE) {
                     cpu->memory->writeq(a2, K_RLIMIT_NOFILE_CUR);
                     cpu->memory->writeq(a2 + 8, K_RLIMIT_NOFILE_MAX);
+                } else if (a1 == K_RLIMIT_STACK) {
+                    // Finite 8MB matching the loader's main stack — WTF's main-thread
+                    // StackBounds reads getrlimit(RLIMIT_STACK); ~0ULL wraps the bound
+                    // and asserts. (See the K_RLIMIT_STACK note above.)
+                    cpu->memory->writeq(a2, K_RLIMIT_STACK_BYTES);
+                    cpu->memory->writeq(a2 + 8, K_RLIMIT_STACK_BYTES);
                 } else {
                     cpu->memory->writeq(a2, ~0ULL);
                     cpu->memory->writeq(a2 + 8, ~0ULL);

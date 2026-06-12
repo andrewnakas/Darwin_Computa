@@ -3682,6 +3682,120 @@ U32 CPU64::step() {
                 rip += used;
                 return used;
             }
+            if (op2 == 0x3A && op3 == 0x0E) {
+                // PBLENDW — 66 0F 3A 0E /r ib. For each of 8 words, take the word
+                // from src when imm8 bit i is set, else keep dest's word. src is
+                // xmm/m128, dest is xmm[reg]. JavaScriptCore's JIT uses it for
+                // NaN-boxing/lane selection (hit right after M5A-EVAL-42).
+                ModRM m = decodeModRM(rip + opOff + 3, p, 1);
+                U64 sLo, sHi;
+                if (m.isReg) {
+                    sLo = xmm[m.rmIndex].lo; sHi = xmm[m.rmIndex].hi;
+                } else {
+                    sLo = memory->readq(m.effAddr);
+                    sHi = memory->readq(m.effAddr + 8);
+                }
+                U8 imm = fetchByte(rip + opOff + 3 + m.length);
+                Xmm& d = xmm[m.regField];
+                for (int i = 0; i < 4; i++) {
+                    if (imm & (1 << i)) { // low 4 words live in .lo
+                        U64 mask = 0xFFFFULL << (i * 16);
+                        d.lo = (d.lo & ~mask) | (sLo & mask);
+                    }
+                }
+                for (int i = 0; i < 4; i++) {
+                    if (imm & (1 << (i + 4))) { // high 4 words live in .hi
+                        U64 mask = 0xFFFFULL << (i * 16);
+                        d.hi = (d.hi & ~mask) | (sHi & mask);
+                    }
+                }
+                U32 used = opOff + 3 + m.length + 1;
+                rip += used;
+                return used;
+            }
+            if (op2 == 0x3A && op3 == 0x16) {
+                // PEXTRD/PEXTRQ — 66 0F 3A 16 /r ib. Extract the 32-bit (or 64-bit
+                // when REX.W) integer element at the lane selected by imm8 from
+                // xmm[reg] into r/m (GP register or memory). Inverse of PINSRD.
+                // JSC's JIT uses it to pull an int lane back to a GPR (the last op
+                // before M5A-DONE, in NSProcessInfo/context teardown).
+                bool isQ = (p.rex & 8) != 0; // REX.W -> PEXTRQ
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0); // GP/mem dest
+                U8 imm = fetchByte(rip + opOff + 3 + m.length);
+                U64 outv;
+                if (isQ) {
+                    outv = (imm & 1) ? xmm[m.regField].hi : xmm[m.regField].lo;
+                } else {
+                    int lane = imm & 3;
+                    U64 q = (lane < 2) ? xmm[m.regField].lo : xmm[m.regField].hi;
+                    outv = (U64)(U32)(q >> ((lane & 1) * 32));
+                }
+                if (m.isReg) {
+                    reg[m.rmIndex].setU64(outv); // 32-bit form zero-extends (outv is U32)
+                } else if (isQ) {
+                    memory->writeq(m.effAddr, outv);
+                } else {
+                    memory->writed(m.effAddr, (U32)outv);
+                }
+                U32 used = opOff + 3 + m.length + 1;
+                rip += used;
+                return used;
+            }
+            if (op2 == 0x3A && op3 == 0x17) {
+                // EXTRACTPS — 66 0F 3A 17 /r ib. Extract the 32-bit element at
+                // lane (imm8 & 3) of xmm[reg] into r/m32 (GP register or memory).
+                // JSC's JIT uses it to pull a float lane back to a GPR (right after
+                // the BLENDVPS, in 'darwin'.toUpperCase()).
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0); // GP/mem dest
+                U8 imm = fetchByte(rip + opOff + 3 + m.length);
+                int lane = imm & 3;
+                U64 q = (lane < 2) ? xmm[m.regField].lo : xmm[m.regField].hi;
+                U32 v = (U32)(q >> ((lane & 1) * 32));
+                if (m.isReg) {
+                    // r/m32: zero-extend into the 64-bit GPR (32-bit op semantics).
+                    reg[m.rmIndex].setU64((U64)v);
+                } else {
+                    memory->writed(m.effAddr, v);
+                }
+                U32 used = opOff + 3 + m.length + 1;
+                rip += used;
+                return used;
+            }
+            if (op2 == 0x3A && op3 == 0x22) {
+                // PINSRD/PINSRQ — 66 0F 3A 22 /r ib. Insert a 32-bit (or 64-bit
+                // when REX.W) value from r/m into xmm[reg] at the dword/qword slot
+                // selected by imm8. The r/m operand is a GENERAL-PURPOSE reg or
+                // memory (NOT xmm). JavaScriptCore's JIT uses this to move JS
+                // doubles/ints into vector lanes during number boxing — first hit
+                // right after JSC engine init + the x87 arithmetic.
+                bool isQ = (p.rex & 8) != 0; // REX.W -> PINSRQ
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0); // GP/mem r/m, not xmm
+                U64 src;
+                if (m.isReg) {
+                    src = isQ ? reg[m.rmIndex].u64 : (U64)reg[m.rmIndex].u32;
+                } else {
+                    src = isQ ? memory->readq(m.effAddr) : (U64)memory->readd(m.effAddr);
+                }
+                U8 imm = fetchByte(rip + opOff + 3 + m.length);
+                Xmm& d = xmm[m.regField];
+                if (isQ) {
+                    // imm8 bit0 selects the qword lane.
+                    if (imm & 1) d.hi = src; else d.lo = src;
+                } else {
+                    // imm8 bits[1:0] select the dword lane (0..3).
+                    int lane = imm & 3;
+                    U32 v = (U32)src;
+                    switch (lane) {
+                        case 0: d.lo = (d.lo & 0xFFFFFFFF00000000ULL) | v; break;
+                        case 1: d.lo = (d.lo & 0x00000000FFFFFFFFULL) | ((U64)v << 32); break;
+                        case 2: d.hi = (d.hi & 0xFFFFFFFF00000000ULL) | v; break;
+                        case 3: d.hi = (d.hi & 0x00000000FFFFFFFFULL) | ((U64)v << 32); break;
+                    }
+                }
+                U32 used = opOff + 3 + m.length + 1;
+                rip += used;
+                return used;
+            }
             if (op2 == 0x3A && (op3 == 0x08 || op3 == 0x09 ||
                                 op3 == 0x0A || op3 == 0x0B)) {
                 // ROUNDPS(08)/ROUNDPD(09)/ROUNDSS(0A)/ROUNDSD(0B) — SSE4.1.
@@ -4103,6 +4217,127 @@ U32 CPU64::step() {
         // are 66 0F 38 /r with a standard ModRM. clang emits PMULLD for
         // int-vector multiply and PMIN/PMAXSD for std::min/max over int[].
         if (osize66 && op2 == 0x38) {
+            U8 op3b0 = fetchByte(rip + opOff + 2);
+            if (op3b0 == 0x2B) {
+                // PACKUSDW — 66 0F 38 2B /r (SSE4.1). Pack 4 signed dwords from
+                // DEST and 4 from SRC into 8 UNSIGNED-saturated words [0,65535]:
+                // result low 64 = packed DEST dwords, high 64 = packed SRC dwords.
+                // JavaScriptCore's string/UTF-16 path emits this (right after
+                // M5A-EVAL-42, in 'darwin'.toUpperCase()).
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0);
+                U64 sLo, sHi;
+                if (m.isReg) { sLo = xmm[m.rmIndex].lo; sHi = xmm[m.rmIndex].hi; }
+                else { sLo = memory->readq(m.effAddr); sHi = memory->readq(m.effAddr + 8); }
+                U64 dLo = xmm[m.regField].lo, dHi = xmm[m.regField].hi;
+                auto satUW = [](U64 q, int idx) -> U16 {
+                    S32 v = (S32)(U32)(q >> (idx * 32)); // idx 0 or 1
+                    if (v < 0) return 0;
+                    if (v > 0xFFFF) return 0xFFFF;
+                    return (U16)v;
+                };
+                // 4 dwords of DEST -> low 4 words; 4 dwords of SRC -> high 4 words.
+                U16 w[8] = {
+                    satUW(dLo, 0), satUW(dLo, 1), satUW(dHi, 0), satUW(dHi, 1),
+                    satUW(sLo, 0), satUW(sLo, 1), satUW(sHi, 0), satUW(sHi, 1),
+                };
+                U64 nLo = 0, nHi = 0;
+                for (int i = 0; i < 4; i++) nLo |= ((U64)w[i])     << (i * 16);
+                for (int i = 0; i < 4; i++) nHi |= ((U64)w[i + 4]) << (i * 16);
+                xmm[m.regField].lo = nLo;
+                xmm[m.regField].hi = nHi;
+                U32 used = opOff + 3 + m.length;
+                rip += used;
+                return used;
+            }
+            U8 op3bv = fetchByte(rip + opOff + 2);
+            if (op3bv == 0x10 || op3bv == 0x14 || op3bv == 0x15) {
+                // Variable blend with the IMPLICIT XMM0 mask (SSE4.1):
+                //   10 PBLENDVB — per byte (mask = XMM0 byte's high bit)
+                //   14 BLENDVPS — per dword (mask = XMM0 dword's high bit)
+                //   15 BLENDVPD — per qword (mask = XMM0 qword's high bit)
+                // For each element, take SRC when the mask bit is set, else keep
+                // DEST. JSC's JIT emits BLENDVPS for branchless lane selection.
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0);
+                U64 sLo, sHi;
+                if (m.isReg) { sLo = xmm[m.rmIndex].lo; sHi = xmm[m.rmIndex].hi; }
+                else { sLo = memory->readq(m.effAddr); sHi = memory->readq(m.effAddr + 8); }
+                U64 dLo = xmm[m.regField].lo, dHi = xmm[m.regField].hi;
+                U64 mLo = xmm[0].lo, mHi = xmm[0].hi; // implicit XMM0 mask
+                U64 nLo = dLo, nHi = dHi;
+                if (op3bv == 0x10) {            // bytes
+                    for (int i = 0; i < 8; i++) {
+                        if ((mLo >> (i*8)) & 0x80) { U64 k=0xFFULL<<(i*8); nLo=(nLo&~k)|(sLo&k); }
+                        if ((mHi >> (i*8)) & 0x80) { U64 k=0xFFULL<<(i*8); nHi=(nHi&~k)|(sHi&k); }
+                    }
+                } else if (op3bv == 0x14) {     // dwords
+                    for (int i = 0; i < 2; i++) {
+                        if ((mLo >> (i*32)) & 0x80000000ULL) { U64 k=0xFFFFFFFFULL<<(i*32); nLo=(nLo&~k)|(sLo&k); }
+                        if ((mHi >> (i*32)) & 0x80000000ULL) { U64 k=0xFFFFFFFFULL<<(i*32); nHi=(nHi&~k)|(sHi&k); }
+                    }
+                } else {                        // qwords (0x15)
+                    if (mLo & 0x8000000000000000ULL) nLo = sLo;
+                    if (mHi & 0x8000000000000000ULL) nHi = sHi;
+                }
+                xmm[m.regField].lo = nLo;
+                xmm[m.regField].hi = nHi;
+                U32 used = opOff + 3 + m.length;
+                rip += used;
+                return used;
+            }
+            U8 op3pm = fetchByte(rip + opOff + 2);
+            if ((op3pm >= 0x20 && op3pm <= 0x25) || (op3pm >= 0x30 && op3pm <= 0x35)) {
+                // PMOVSX* (20-25) / PMOVZX* (30-35) — SSE4.1 packed sign/zero
+                // extend. The low elements of SRC (xmm or memory) are widened into
+                // the full 128-bit DEST. The "from->to" width and how many source
+                // bytes are consumed depend on op3:
+                //   x0 B->W (8 src bytes -> 8 words)   x3 W->D (8 -> 4 dwords)
+                //   x1 B->D (4 -> 4 dwords)            x4 W->Q (4 -> 2 qwords)
+                //   x2 B->Q (2 -> 2 qwords)            x5 D->Q (8 -> 2 qwords)
+                // 2x=sign-extend (op3pm<0x30), 3x=zero-extend. JSC's JIT uses these
+                // to widen JS byte/char data into int lanes.
+                bool zext = (op3pm >= 0x30);
+                U8 lo = op3pm & 0x0F; // 0..5 selects the conversion
+                ModRM m = decodeModRM(rip + opOff + 3, p, 0);
+                // Source: for register form take the low 8 bytes of the xmm; for
+                // memory only the needed low bytes are referenced (read 8, mask).
+                U64 sBytes;
+                if (m.isReg) {
+                    sBytes = xmm[m.rmIndex].lo;
+                } else {
+                    sBytes = memory->readq(m.effAddr); // low 8 bytes cover every form
+                }
+                auto sb = [&](int i) -> U8 { return (U8)(sBytes >> (i * 8)); };
+                auto sw = [&](int i) -> U16 { return (U16)(sBytes >> (i * 16)); };
+                auto sd = [&](int i) -> U32 { return (U32)(sBytes >> (i * 32)); };
+                U64 nLo = 0, nHi = 0;
+                auto ext8  = [&](U8 v)  -> U64 { return zext ? (U64)v : (U64)(S64)(S8)v; };
+                auto ext16 = [&](U16 v) -> U64 { return zext ? (U64)v : (U64)(S64)(S16)v; };
+                auto ext32 = [&](U32 v) -> U64 { return zext ? (U64)v : (U64)(S64)(S32)v; };
+                if (lo == 0) {        // B->W : 8 words
+                    U16 w[8]; for (int i=0;i<8;i++) w[i]=(U16)ext8(sb(i));
+                    for (int i=0;i<4;i++) nLo |= ((U64)w[i])   << (i*16);
+                    for (int i=0;i<4;i++) nHi |= ((U64)w[i+4]) << (i*16);
+                } else if (lo == 1) { // B->D : 4 dwords
+                    U32 dw[4]; for (int i=0;i<4;i++) dw[i]=(U32)ext8(sb(i));
+                    nLo = (U64)dw[0] | ((U64)dw[1]<<32);
+                    nHi = (U64)dw[2] | ((U64)dw[3]<<32);
+                } else if (lo == 2) { // B->Q : 2 qwords
+                    nLo = ext8(sb(0)); nHi = ext8(sb(1));
+                } else if (lo == 3) { // W->D : 4 dwords
+                    U32 dw[4]; for (int i=0;i<4;i++) dw[i]=(U32)ext16(sw(i));
+                    nLo = (U64)dw[0] | ((U64)dw[1]<<32);
+                    nHi = (U64)dw[2] | ((U64)dw[3]<<32);
+                } else if (lo == 4) { // W->Q : 2 qwords
+                    nLo = ext16(sw(0)); nHi = ext16(sw(1));
+                } else {              // lo==5 D->Q : 2 qwords
+                    nLo = ext32(sd(0)); nHi = ext32(sd(1));
+                }
+                xmm[m.regField].lo = nLo;
+                xmm[m.regField].hi = nHi;
+                U32 used = opOff + 3 + m.length;
+                rip += used;
+                return used;
+            }
             U8 op3b = fetchByte(rip + opOff + 2);
             if (op3b == 0x39 || op3b == 0x3D || op3b == 0x40 ||
                 op3b == 0x38 || op3b == 0x3C) {
@@ -5311,6 +5546,49 @@ U32 CPU64::step() {
                 // no-ops on all CPUs since the 80287. Accept and ignore.
             } else if (op == 0xD9 && modrmByte == 0xD0) {
                 // D9 D0 = FNOP — explicit x87 no-op.
+            } else if (op == 0xD8 && (modrmByte & 0xC0) == 0xC0 &&
+                       (modrmByte & 0xF0) != 0xD0) {
+                // D8 C0+i/C8+i/E0+i/E8+i/F0+i/F8+i — arithmetic, NO pop, dest ST(0):
+                //   C0 FADD ST(0),ST(i)   C8 FMUL ST(0),ST(i)
+                //   E0 FSUB ST(0),ST(i)   E8 FSUBR ST(0),ST(i)
+                //   F0 FDIV ST(0),ST(i)   F8 FDIVR ST(0),ST(i)
+                // (D0/D8 = FCOM/FCOMP, handled above; excluded via the 0xD0 mask.)
+                // First hit: JavaScriptCore's JS number arithmetic (dc c8 = FMUL,
+                // and the D8 forms) at JSC engine init — the unimpl trap killed jsc.
+                U32 s0 = fpu.STV(0);
+                U32 si = fpu.STV(i);
+                switch (modrmByte & 0xF8) {
+                    case 0xC0: fpu.FADD(s0, si);  break;
+                    case 0xC8: fpu.FMUL(s0, si);  break;
+                    case 0xE0: fpu.FSUB(s0, si);  break; // ST(0) = ST(0) - ST(i)
+                    case 0xE8: fpu.FSUBR(s0, si); break; // ST(0) = ST(i) - ST(0)
+                    case 0xF0: fpu.FDIV(s0, si);  break; // ST(0) = ST(0) / ST(i)
+                    case 0xF8: fpu.FDIVR(s0, si); break; // ST(0) = ST(i) / ST(0)
+                    default: goto unhandled;
+                }
+            } else if (op == 0xDC && (modrmByte & 0xC0) == 0xC0 &&
+                       (modrmByte & 0xF0) != 0xD0) {
+                // DC C0+i/C8+i/E0+i/E8+i/F0+i/F8+i — arithmetic, NO pop, dest ST(i).
+                // Note the x87 SUB/DIV direction is SWAPPED vs D8 (and the operand
+                // order is ST(i),ST(0)):
+                //   C0 FADD ST(i),ST(0)   C8 FMUL ST(i),ST(0)
+                //   E0 FSUBR ST(i),ST(0): ST(i) = ST(0) - ST(i)
+                //   E8 FSUB  ST(i),ST(0): ST(i) = ST(i) - ST(0)
+                //   F0 FDIVR ST(i),ST(0): ST(i) = ST(0) / ST(i)
+                //   F8 FDIV  ST(i),ST(0): ST(i) = ST(i) / ST(0)
+                // (D0/D8 = reserved here; excluded via the 0xD0 mask.) The shared
+                // FPU helpers are (destSlot, srcSlot); FSUB(d,s)=d-s, FSUBR(d,s)=s-d.
+                U32 s0 = fpu.STV(0);
+                U32 si = fpu.STV(i);
+                switch (modrmByte & 0xF8) {
+                    case 0xC0: fpu.FADD(si, s0);  break;
+                    case 0xC8: fpu.FMUL(si, s0);  break;
+                    case 0xE0: fpu.FSUBR(si, s0); break; // ST(i) = ST(0) - ST(i)
+                    case 0xE8: fpu.FSUB(si, s0);  break; // ST(i) = ST(i) - ST(0)
+                    case 0xF0: fpu.FDIVR(si, s0); break; // ST(i) = ST(0) / ST(i)
+                    case 0xF8: fpu.FDIV(si, s0);  break; // ST(i) = ST(i) / ST(0)
+                    default: goto unhandled;
+                }
             } else {
                 goto unhandled;
             }
