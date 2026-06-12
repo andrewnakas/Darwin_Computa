@@ -626,6 +626,23 @@ if [ -f "$APP_SRC/build-jsoncli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M8 (S51): xmlcli — event-driven XML parsing via NSXMLParser ---------------
+# A second Foundation data format (distinct from JSON), exercising the SAX
+# delegate chain. xmlcli.m parses an XML doc with a delegate that counts elements,
+# reads an attribute, and accumulates element text (didStartElement /
+# foundCharacters / didEndElement). Installed at /usr/bin/xmlcli. VERIFIED M8/S51
+# (live): M8-PARSE-OK / M8-ELEMENTS-3 / M8-ATTR-42 / M8-TEXT-DARWIN / M8-DONE. Run:
+# BW64_SHELLSPAWN=/usr/bin/xmlcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-xmlcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-xmlcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/xmlcli" ]; then
+            echo "--- M8/S51: staged xmlcli at usr/bin/xmlcli ---"
+        fi
+    else
+        echo "WARNING: xmlcli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
