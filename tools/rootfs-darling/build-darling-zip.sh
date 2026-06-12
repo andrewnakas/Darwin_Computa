@@ -590,6 +590,25 @@ if [ -f "$APP_SRC/build-jscli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M6' (S49): sqlitecli — real on-disk SQLite persistence via libsqlite3 ------
+# CoreData (M6) was un-usable here (Darling's Cocotron CoreData is incomplete), so
+# we prove the persistence capability DIRECTLY on libsqlite3 (the staged full
+# SQLite), which works. sqlitecli.m declares the SQLite C API extern and does
+# CREATE/INSERT then CLOSE + RE-OPEN a fresh connection + SELECT (reading back from
+# disk). Installed at /usr/bin/sqlitecli. VERIFIED M6'/S49 (live): M6P-VERSION-3.32.3
+# / M6P-OPEN-OK / M6P-CREATE-OK / M6P-INSERT-3 / M6P-FILE-8192 / M6P-REOPEN-OK /
+# M6P-SELECT-3 / M6P-VALUE-NOTE-2-42 / M6P-DONE. Run:
+# BW64_SHELLSPAWN=/usr/bin/sqlitecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-sqlitecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-sqlitecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/sqlitecli" ]; then
+            echo "--- M6'/S49: staged sqlitecli at usr/bin/sqlitecli ---"
+        fi
+    else
+        echo "WARNING: sqlitecli build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
