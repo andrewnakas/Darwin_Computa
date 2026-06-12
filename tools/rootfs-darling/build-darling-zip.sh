@@ -525,6 +525,29 @@ if [ -f "$APP_SRC/build-netcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M4b (S44): httpget — a reliable HTTP client w/ in-process chunked decode --
+# M4 proved the transport; M4b proves a COMPLETE, DECODED HTTP transaction.
+# Darling's high-level CFNetwork loaders are flakily broken on this substrate
+# (NSURLSession missing-selector; NSURLConnection -1015 on chunked bodies via its
+# broken chunked decoder + intermittent -1001 connection-setup), so httpget builds
+# the HTTP layer on the reliable raw socket bridge and decodes chunked
+# transfer-encoding ITSELF. Installed at /usr/bin/httpget. VERIFIED M4b/S44 (live,
+# example.com): M4B-DNS-<ip> / M4B-CONNECT-OK / M4B-STATUS-200 /
+# M4B-ENCODING-chunked / M4B-DECODED-559 / M4B-HASMARKER-1 (NSString contains: the
+# real page title) / M4B-DONE, exit_group(0). Run:
+# BW64_SHELLSPAWN=/usr/bin/httpget bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+# (neturl, the NSURLConnection diagnostic that mapped the CFNetwork gaps, is kept
+# in tools/darwin-app/ but not staged — it intentionally fails on this substrate.)
+if [ -f "$APP_SRC/build-httpget.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-httpget.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/httpget" ]; then
+            echo "--- M4b/S44: staged httpget at usr/bin/httpget ---"
+        fi
+    else
+        echo "WARNING: httpget build failed; not staged." >&2
+    fi
+fi
+
 # --- S37: X11 locale/compose data (libx11-data) ------------------------------
 # Cocotron's AppKit translates KeyPress -> NSEvent characters via XIM
 # (Xutf8LookupString on a per-window XIC). libX11's XOpenIM needs
