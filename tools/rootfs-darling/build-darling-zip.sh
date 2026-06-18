@@ -545,6 +545,24 @@ if [ -f "$APP_SRC/build-listguiapp.sh" ] && command -v clang >/dev/null 2>&1; th
     fi
 fi
 
+# --- M14 (S57): AppGui.app — CAPSTONE: JS + SQLite + GUI list in one app -------
+# The capstone synthesis: combines THREE heavy proven subsystems in one window —
+# JavaScriptCore (M5a) + SQLite (M6') + AppKit list (M11/M12/M13). "Compute & Save"
+# click -> JS computes a value -> INSERT into SQLite -> re-render the saved-values
+# list. Same init-before-makeKeyAndOrderFront ordering as M11. VERIFIED M14/S57
+# (live): M14-WINDOW-OK / M14-JSC-OK / M14-DB-OK / 'first window mapped' / M14-DONE +
+# a click -> M14-COMPUTE-3 (JS 'Math.pow(2,1)+1' -> SQLite) / M14-LIST-1. Launch:
+# bash tools/run_darling_app_bundle.sh /Applications/AppGui.app
+if [ -f "$APP_SRC/build-appgui.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-appgui.sh" >/dev/null 2>&1; then
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/AppGui.app" ]; then
+            echo "--- M14/S57: staged AppGui.app at Applications/AppGui.app ---"
+        fi
+    else
+        echo "WARNING: appgui bundle build failed; AppGui.app not staged." >&2
+    fi
+fi
+
 # --- M3 (S42): foundationcli — a NORMAL Objective-C Foundation program -------
 # Unlike akapp/darwinpad (which hand-roll objc_msgSend via extern decls + cast-
 # through calls), foundationcli.m is REAL Objective-C ([obj msg], @"literals",
