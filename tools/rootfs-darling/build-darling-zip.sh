@@ -483,6 +483,29 @@ if [ -f "$APP_SRC/build-darwinpad.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M11 (S54): JSGui.app — a GUI app that RUNS JAVASCRIPT (AppKit + JavaScriptCore)
+# The first SYNTHESIS app: composes the proven GUI chain (S37/S38: NSWindow + X11
+# backend + GL present) with JavaScriptCore (M5a). jsguiapp.c builds an NSWindow
+# with an NSTextField + "Run JS" button, brings up a JSC context, evaluates JS
+# (6*7=42, 'darwin'.toUpperCase()), shows the result in the field, and re-evaluates
+# JS on each button click. KEY INTEGRATION FIX: create the JSC context AFTER the
+# NSWindow+views are built but BEFORE makeKeyAndOrderFront — JSC's GC/JIT thread
+# creation races AppKit's X11 event-pump threads (the S34/S35 darlingserver
+# thread-checkin wedge) if done after the window maps; the pre-map gap is quiet.
+# VERIFIED M11/S54 (live): M11-WINDOW-OK / M11-JSC-CTX-OK / M11-JS-EVAL-42 /
+# M11-JS-STR-DARWIN / M11-FIELD-SET / M11-DONE / 'first window mapped' + a button
+# click -> 'click 1 -> JS says 7 from JS'. Launch:
+# bash tools/run_darling_app_bundle.sh /Applications/JSGui.app
+if [ -f "$APP_SRC/build-jsguiapp.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-jsguiapp.sh" >/dev/null 2>&1; then
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/JSGui.app" ]; then
+            echo "--- M11/S54: staged JSGui.app at Applications/JSGui.app ---"
+        fi
+    else
+        echo "WARNING: jsguiapp bundle build failed; JSGui.app not staged." >&2
+    fi
+fi
+
 # --- M3 (S42): foundationcli — a NORMAL Objective-C Foundation program -------
 # Unlike akapp/darwinpad (which hand-roll objc_msgSend via extern decls + cast-
 # through calls), foundationcli.m is REAL Objective-C ([obj msg], @"literals",
