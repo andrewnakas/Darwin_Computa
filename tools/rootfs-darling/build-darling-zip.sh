@@ -506,6 +506,25 @@ if [ -f "$APP_SRC/build-jsguiapp.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M12 (S55): DbGui.app — a GUI app BACKED BY SQLite (AppKit + libsqlite3) ---
+# Second synthesis app: the proven GUI chain (S37/S38) + on-disk SQLite (M6'). A
+# "notes" app: opens a SQLite DB, CREATE TABLE + INSERT a row, shows the live
+# COUNT in an NSTextField, and INSERTs another row on each "Add note" click. Same
+# safe ordering as M11 (open the DB after window-build, before makeKeyAndOrderFront).
+# VERIFIED M12/S55 (live): M12-WINDOW-OK / M12-DB-OPEN-OK / M12-DB-INSERT-1(count=1)
+# / M12-FIELD-SET / 'first window mapped' / M12-DONE + 'Add note' clicks ->
+# count 1->2->3 (live DB writes from the GUI). Launch:
+# bash tools/run_darling_app_bundle.sh /Applications/DbGui.app
+if [ -f "$APP_SRC/build-dbguiapp.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-dbguiapp.sh" >/dev/null 2>&1; then
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/DbGui.app" ]; then
+            echo "--- M12/S55: staged DbGui.app at Applications/DbGui.app ---"
+        fi
+    else
+        echo "WARNING: dbguiapp bundle build failed; DbGui.app not staged." >&2
+    fi
+fi
+
 # --- M3 (S42): foundationcli — a NORMAL Objective-C Foundation program -------
 # Unlike akapp/darwinpad (which hand-roll objc_msgSend via extern decls + cast-
 # through calls), foundationcli.m is REAL Objective-C ([obj msg], @"literals",
