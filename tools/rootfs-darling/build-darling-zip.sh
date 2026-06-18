@@ -525,6 +525,26 @@ if [ -f "$APP_SRC/build-dbguiapp.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M13 (S56): ListGui.app — a GUI app that PARSES JSON INTO A LIST -----------
+# Third synthesis app: the proven GUI chain (S37/S38) + NSJSONSerialization (M7) +
+# Foundation collection enumeration (M3). Parses an embedded JSON array of {name,
+# score} records and renders ONE NSTextField per record — a real "list view" of
+# parsed data (the fetch/parse->display shape of most apps; data is embedded since
+# the live-network fetch M10 is blocked on a guest-TLS issue). JSON is pure
+# Foundation (no extra lib/threads). VERIFIED M13/S56 (live): M13-WINDOW-OK /
+# M13-JSON-PARSE-3 / M13-ROW-0-alpha-10 / -1-bravo-42 / -2-charlie-7 /
+# M13-ROWS-SHOWN-3 / 'first window mapped'. Launch:
+# bash tools/run_darling_app_bundle.sh /Applications/ListGui.app
+if [ -f "$APP_SRC/build-listguiapp.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-listguiapp.sh" >/dev/null 2>&1; then
+        if [ -d "$STAGEHOST/dist/stage/usr/libexec/darling/Applications/ListGui.app" ]; then
+            echo "--- M13/S56: staged ListGui.app at Applications/ListGui.app ---"
+        fi
+    else
+        echo "WARNING: listguiapp bundle build failed; ListGui.app not staged." >&2
+    fi
+fi
+
 # --- M3 (S42): foundationcli — a NORMAL Objective-C Foundation program -------
 # Unlike akapp/darwinpad (which hand-roll objc_msgSend via extern decls + cast-
 # through calls), foundationcli.m is REAL Objective-C ([obj msg], @"literals",
