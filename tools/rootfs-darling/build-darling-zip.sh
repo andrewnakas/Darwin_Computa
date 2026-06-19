@@ -987,6 +987,28 @@ if [ -f "$APP_SRC/build-urlcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M28 (S71): numcli — number formatting + parsing via NSNumberFormatter ------
+# A fundamental Foundation capability (pure Foundation, no networking). numcli.m
+# pins en_US_POSIX with explicit fraction digits: format 1234567.5 ungrouped ->
+# "1234567.50", 42 -> "42.00", parse "1234567.50" back == 1234567.5, negative round
+# trip -42.25, and grouping WITH an explicit grouping size -> "1,234,567.50". Guest
+# quirk recorded: Cocotron NSNumberFormatter needs an EXPLICIT setGroupingSize: to
+# emit separators (setUsesGroupingSeparator:YES alone leaves size 0 = no grouping;
+# the host default of 3 masks this). Selectors pre-vetted present (M22); CF by-path
+# (M17). Installed at /usr/bin/numcli. VERIFIED M28/S71 (live): M28-FMT-OK /
+# M28-FMT42-OK / M28-PARSE-OK / M28-NEG-ROUNDTRIP-OK / M28-GROUPING-OK / M28-DONE —
+# a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/numcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-numcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-numcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/numcli" ]; then
+            echo "--- M28/S71: staged numcli at usr/bin/numcli ---"
+        fi
+    else
+        echo "WARNING: numcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
