@@ -943,6 +943,27 @@ if [ -f "$APP_SRC/build-archcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M26 (S69): deccli — exact decimal arithmetic + NSCountedSet counting -------
+# Two fundamental Foundation capabilities (pure Foundation, no networking).
+# NSDecimalNumber does arbitrary-precision BASE-10 math (what money needs — binary
+# float cannot represent 0.10+0.20 exactly, decimal can); NSCountedSet is a
+# frequency multiset. deccli.m: 0.10+0.20 == "0.3" exactly (and shows the C double
+# 0.1+0.2 != 0.3), 19.99*3 == "59.97" exactly, and counts [a,b,a,c,a,b] -> a:3/b:2/
+# c:1. All selectors pre-vetted present (M22); CoreFoundation linked BY PATH (M17).
+# Installed at /usr/bin/deccli. VERIFIED M26/S69 (live): M26-DEC-SUM-0.3 /
+# M26-DEC-SUM-OK / M26-DOUBLE-DIFFERS-OK / M26-DEC-MUL-59.97 / M26-DEC-MUL-OK /
+# M26-CSET-A-3 / M26-CSET-OK / M26-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/deccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-deccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-deccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/deccli" ]; then
+            echo "--- M26/S69: staged deccli at usr/bin/deccli ---"
+        fi
+    else
+        echo "WARNING: deccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
