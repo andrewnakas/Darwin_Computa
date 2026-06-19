@@ -781,6 +781,29 @@ if [ -f "$APP_SRC/build-xpathcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M19 (S62): arccli — archive (tar) create + extract via libarchive ---------
+# A structured-archive capability above M15's raw zlib byte compression. arccli.m
+# does a fully self-contained in-memory round trip: write a 2-entry ustar tar via
+# the libarchive write API, then read it back via the read API (format/filter
+# auto-detect), enumerate entries (pathname + size), and verify the extracted body
+# bytes. libarchive is a clean self-contained staged C lib (deps libSystem/liblzma/
+# libz/libbz2/libiconv); build-arccli.sh links it BY PATH and the C API is declared
+# extern (no archive.h staged; archive/archive_entry are opaque pointers, ABI
+# validated header-free on host). Installed at /usr/bin/arccli. VERIFIED M19/S62
+# (live): M19-ARCVER-libarchive 3.3.2 / M19-WRITE-OK / M19-WROTE-3072 /
+# M19-READ-OPEN-OK / M19-ENTRY-note.txt-14 / M19-ENTRY-data.bin-22 / M19-COUNT-2 /
+# M19-CONTENT-OK / M19-NSSTRING-OK / M19-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/arccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-arccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-arccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/arccli" ]; then
+            echo "--- M19/S62: staged arccli at usr/bin/arccli ---"
+        fi
+    else
+        echo "WARNING: arccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
