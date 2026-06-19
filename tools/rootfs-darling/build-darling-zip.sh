@@ -1051,6 +1051,30 @@ if [ -f "$APP_SRC/build-datacli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M31 (S74): pipecli — CLI SYNTHESIS (JSON -> predicate -> archive -> SHA-256) -
+# Composes four separately-proven capabilities into one data pipeline in a single
+# process (the CLI analog of the M11-M14 GUI synthesis tier) — proving they
+# INTEROPERATE: JSON parse (M7) -> NSPredicate filter (M24) -> NSKeyedArchiver (M25)
+# -> SHA-256 (M20). pipecli.m parses a JSON record array, filters qty>=20, keyed-
+# archives the result, SHA-256s the archive, runs the whole pipeline TWICE to prove
+# end-to-end determinism (identical digest), and round-trips the unarchive. Links the
+# union of needs BY PATH: Foundation + CoreFoundation (M17) + modern libcrypto.44
+# (M20). Installed at /usr/bin/pipecli. VERIFIED M31/S74 (live): M31-JSON-OK /
+# M31-COUNT-3 / M31-NAMES-beta,gamma,delta / M31-STABLE-OK / M31-UNARCHIVE-OK /
+# M31-DONE — full clean pass on the archive-format-independent gating checks (the SHA
+# value + archive length differ from host: guest NSKeyedArchiver encodes differently,
+# non-gating). Run:
+# BW64_SHELLSPAWN=/usr/bin/pipecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-pipecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-pipecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/pipecli" ]; then
+            echo "--- M31/S74: staged pipecli at usr/bin/pipecli ---"
+        fi
+    else
+        echo "WARNING: pipecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
