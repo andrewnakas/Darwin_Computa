@@ -1121,6 +1121,27 @@ if [ -f "$APP_SRC/build-dbjzcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M34 (S77): setcli — NSSet set algebra + NSOrderedSet ordered-unique ---------
+# Collection capabilities (pure Foundation, no networking) rounding out the
+# collections tier alongside M24 (predicate/sort) and M26 (counted set). setcli.m:
+# membership, dedup via setWithArray:, union/intersect/minus, isSubsetOfSet:, and
+# NSOrderedSet insertion-order + uniqueness (count/indexOfObject:/objectAtIndex:).
+# Selectors pre-vetted (M22); NSSet/NSOrderedSet are CF-resident so build-setcli.sh
+# links CoreFoundation BY PATH (M17). Installed at /usr/bin/setcli. VERIFIED M34/S77
+# (live, matches host exactly): M34-HAS-1 / M34-DEDUP-3 / M34-UNION-4 /
+# M34-INTERSECT-2 / M34-MINUS-2 / M34-SUBSET-1 / M34-ORDERED-CNT-3 / M34-ORDERED-IDX-1
+# / M34-ORDERED-FIRST-c / M34-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/setcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-setcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-setcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/setcli" ]; then
+            echo "--- M34/S77: staged setcli at usr/bin/setcli ---"
+        fi
+    else
+        echo "WARNING: setcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
