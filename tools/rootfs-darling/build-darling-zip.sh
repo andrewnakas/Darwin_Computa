@@ -1099,6 +1099,28 @@ if [ -f "$APP_SRC/build-x2jcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M33 (S76): dbjzcli — PERSISTENCE-TIER SYNTHESIS (SQLite -> JSON -> zlib) ----
+# CLI synthesis #3, the persistence tier end to end. Composes a real on-disk DB, the
+# Foundation data tier, and compression in one process: SQLite on disk (M6') ->
+# NSJSONSerialization (M7) -> zlib compress (M15). dbjzcli.m opens an on-disk SQLite
+# DB, CREATE+INSERT 3 rows, SELECT them back via a prepared statement into a
+# Foundation array, serializes to JSON, zlib-compresses, then uncompresses and
+# confirms byte-identity + re-parses. Links Foundation + CoreFoundation (M17) +
+# libsqlite3 (M6') + libz.1 (M15) by path; C APIs extern. Installed at
+# /usr/bin/dbjzcli. VERIFIED M33/S76 (live, matches host exactly): M33-DBOPEN-OK /
+# M33-INSERT-3 / M33-SELECT-3 / M33-NAME2-beta / M33-JSON-72 / M33-ZIP-52 /
+# M33-ROUNDTRIP-OK / M33-REPARSE-3 / M33-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/dbjzcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-dbjzcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-dbjzcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/dbjzcli" ]; then
+            echo "--- M33/S76: staged dbjzcli at usr/bin/dbjzcli ---"
+        fi
+    else
+        echo "WARNING: dbjzcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
