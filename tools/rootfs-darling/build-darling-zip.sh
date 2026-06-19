@@ -689,6 +689,24 @@ if [ -f "$APP_SRC/build-sqlitecli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M15 (S58): zcli — data compression via the staged libz (zlib) ------------
+# Deterministic, headless capability on a staged C lib (the libsqlite3/OpenSSL
+# pattern), no networking. zcli.m declares the zlib C API extern and does a
+# compress -> uncompress round-trip with byte-identity + crc32. Installed at
+# /usr/bin/zcli. VERIFIED M15/S58 (live): M15-ZVER-1.2.11 / M15-ORIG-1024 /
+# M15-CRC-220d331a / M15-COMPRESSED-32 / M15-SMALLER-1 / M15-ROUNDTRIP-OK /
+# M15-NSSTRING-OK / M15-DONE. Run:
+# BW64_SHELLSPAWN=/usr/bin/zcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-zcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-zcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/zcli" ]; then
+            echo "--- M15/S58: staged zcli at usr/bin/zcli ---"
+        fi
+    else
+        echo "WARNING: zcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
