@@ -1075,6 +1075,30 @@ if [ -f "$APP_SRC/build-pipecli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M32 (S75): x2jcli — CROSS-TIER SYNTHESIS (libxml2 XPath -> JSON -> AES) -----
+# CLI synthesis #2, spanning the C-library tier and the Foundation tier in one
+# process to prove they interoperate across the boundary (a different mix than M31):
+# libxml2 XPath (M18) -> NSJSONSerialization (M7) -> AES-256-CBC enc/dec (M21).
+# x2jcli.m parses an XML <catalog> with libxml2, XPath //book extracts title+price
+# into a Foundation array, serializes to JSON, AES-256 encrypts the JSON (fixed
+# key+IV), decrypts it back (byte-identical), and re-parses the JSON to confirm the
+# data survived the full round trip. Links Foundation + CoreFoundation (M17) +
+# libxml2.2 (M18) + libcrypto.44 (M21) by path; C APIs extern (libxml2 structs
+# head-prefix, ABI-validated header-free on host). Installed at /usr/bin/x2jcli.
+# VERIFIED M32/S75 (live, matches host exactly): M32-XML-OK / M32-XPATH-3 /
+# M32-JSON-110 / M32-ENC-LEN-112 / M32-DEC-OK / M32-REPARSE-3 / M32-TITLE2-Computa /
+# M32-PRICE2-31.50 / M32-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/x2jcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-x2jcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-x2jcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/x2jcli" ]; then
+            echo "--- M32/S75: staged x2jcli at usr/bin/x2jcli ---"
+        fi
+    else
+        echo "WARNING: x2jcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
