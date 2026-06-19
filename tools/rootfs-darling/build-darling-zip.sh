@@ -898,6 +898,28 @@ if [ -f "$APP_SRC/build-scancli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M24 (S67): predcli — NSPredicate + NSSortDescriptor + NSExpression --------
+# Collection querying (pure Foundation, no networking): filter/sort/evaluate over an
+# in-memory array of dictionaries — the core of fetch requests and rule engines.
+# predcli.m: predicateWithFormat:@"qty >= 20" + filteredArrayUsingPredicate:, a
+# descending NSSortDescriptor, an arithmetic NSExpression (6*7), and a compound AND
+# predicate. ALL selectors verified present in the staged guest binary before
+# authoring (M22 lesson). NSPredicate leans on CF machinery so build-predcli.sh
+# links CoreFoundation BY PATH (M17). Installed at /usr/bin/predcli. VERIFIED
+# M24/S67 (live): M24-COUNT-4 / M24-FILTER-3 / M24-FILTER-NAMES-beta,gamma,delta /
+# M24-SORT-TOP-gamma / M24-SORT-ORDER-gamma,delta,beta / M24-EXPR-42 / M24-AND-1 /
+# M24-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/predcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-predcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-predcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/predcli" ]; then
+            echo "--- M24/S67: staged predcli at usr/bin/predcli ---"
+        fi
+    else
+        echo "WARNING: predcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
