@@ -758,6 +758,29 @@ if [ -f "$APP_SRC/build-datecli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M18 (S61): xpathcli — DIRECT libxml2 with XPath queries + DOM navigation --
+# A DEEPER, NEW capability over M8's NSXMLParser SAX wrapper: drives libxml2's real
+# engine directly to build an in-memory DOM, navigate the element tree, read
+# attributes/text, and run XPath expressions (node-set selection + string()
+# extraction) — which the SAX-only path cannot do. libxml2 is a clean self-contained
+# staged C lib (deps libSystem/libicucore/libz/libc++); build-xpathcli.sh links it
+# BY PATH and the C API is declared extern (no libxml headers staged; the touched
+# structs are mirrored by their head prefix, ABI-validated header-free on host).
+# Installed at /usr/bin/xpathcli. VERIFIED M18/S61 (live): M18-XMLVER-20904 /
+# M18-PARSE-OK / M18-ROOT-catalog / M18-FIRSTCHILD-book / M18-ATTR-b1 /
+# M18-TEXT-Darwin / M18-XPATH-COUNT-3 / M18-XPATH-PRICE-31.50 / M18-NSSTRING-OK /
+# M18-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/xpathcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-xpathcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-xpathcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/xpathcli" ]; then
+            echo "--- M18/S61: staged xpathcli at usr/bin/xpathcli ---"
+        fi
+    else
+        echo "WARNING: xpathcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
