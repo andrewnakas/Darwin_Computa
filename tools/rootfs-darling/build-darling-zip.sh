@@ -1142,6 +1142,26 @@ if [ -f "$APP_SRC/build-setcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M35 (S78): proccli — NSProcessInfo process + environment introspection ------
+# Runtime introspection (pure Foundation, no networking): env vars, process name, OS
+# version, CPU/memory facts, unique-id minting. proccli.m: environment dict (>0,
+# PATH present), processName, operatingSystemVersionString, processorCount (>=1),
+# physicalMemory (>0), globallyUniqueString (two calls differ). Gating is STRUCTURAL
+# (the guest's runtime facts differ from host). Selectors pre-vetted (M22); CF by-path
+# (M17). Installed at /usr/bin/proccli. VERIFIED M35/S78 (live): M35-ENV-COUNT-10 /
+# M35-ENV-HASPATH-1 / M35-PROCNAME-proccli / M35-OSVER-OK / M35-CPUS-8 / M35-MEM-OK /
+# M35-GUID-OK / M35-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/proccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-proccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-proccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/proccli" ]; then
+            echo "--- M35/S78: staged proccli at usr/bin/proccli ---"
+        fi
+    else
+        echo "WARNING: proccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
