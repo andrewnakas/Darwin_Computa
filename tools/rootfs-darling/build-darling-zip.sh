@@ -827,6 +827,29 @@ if [ -f "$APP_SRC/build-cryptocli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M21 (S64): aescli — AES-256-CBC symmetric encryption via libcrypto EVP ----
+# Extends M20 (digests) to the CIPHER path of the same modern OpenSSL. aescli.m does
+# a deterministic encrypt->decrypt round trip with a FIXED key+IV: encrypt a known
+# plaintext via EVP_EncryptInit/Update/Final (EVP_aes_256_cbc, PKCS#7), confirm the
+# ciphertext hex equals the authoritative host value, then decrypt via
+# EVP_DecryptInit/Update/Final and confirm byte-identity with the original. Uses the
+# MODERN libcrypto.44 (in-guest LibreSSL 2.8.3 under OpenSSL-44 versioning, per M20);
+# build-aescli.sh links it BY PATH and declares the C API extern (no openssl headers;
+# EVP_CIPHER_CTX opaque, ABI-validated header-free on host). Installed at
+# /usr/bin/aescli. VERIFIED M21/S64 (live): M21-SSLVER-LibreSSL 2.8.3 /
+# M21-ENC-LEN-32 / M21-CIPHER-OK / M21-DIFFERS-OK / M21-DEC-LEN-31 /
+# M21-ROUNDTRIP-OK / M21-NSDATA-OK / M21-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/aescli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-aescli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-aescli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/aescli" ]; then
+            echo "--- M21/S64: staged aescli at usr/bin/aescli ---"
+        fi
+    else
+        echo "WARNING: aescli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
