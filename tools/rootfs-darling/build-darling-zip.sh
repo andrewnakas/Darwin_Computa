@@ -727,6 +727,37 @@ if [ -f "$APP_SRC/build-fmcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M17 (S60): datecli — date/time via NSDateFormatter + NSCalendar -----------
+# A fundamental Foundation capability (parsing/formatting dates + calendar
+# arithmetic). datecli.m parses a fixed UTC instant, round-trips the format,
+# reformats under a different pattern, decomposes to NSDateComponents (year/month/
+# day) via a Gregorian NSCalendar, adds 40 days, and measures the interval. KEY
+# LINK FIX (resolves the M8 NSCharacterSet by-path gotcha): NSDate/NSCalendar/
+# NSLocale/NSTimeZone/NSDateComponents are defined in CoreFoundation (imported U
+# into Foundation, which re-exports it), so build-datecli.sh links CoreFoundation
+# BY PATH too. Installed at /usr/bin/datecli. VERIFIED M17/S60 (live): M17-PARSE-OK
+# / M17-FORMAT-2026-01-15 12:00:00 +0000 / M17-ALTFMT-... / M17-YMD-2026-1-15 /
+# M17-PLUS40-2026-02-24 12:00:00 +0000 / M17-INTERVAL-3456000 / M17-DONE.
+# KNOWN GAP (non-gating, like the M16 remove gap): the embedded-ICU-66 day-of-week
+# derivation is wrong under emulation — weekday reports Sun(1) for a date whose YMD
+# correctly extracts as Thu(2026-01-15); an internally-consistent off-by-4 across
+# both the NSCalendar weekday component and the EEE formatter. Not a data/mmap
+# issue (ICU data is embedded: symbol _icudt66_dat) and not a TZ slip (YMD right);
+# a prebuilt ICU defect, not recompilable in-tree. The probe cross-checks the
+# authoritative weekday with Zeller's congruence (works in-guest: pure integer math
+# on the correct YMD) -> M17-WEEKDAY-MATCH-MISMATCH (ICU=1 vs Zeller=5). Gate = the
+# 6 working facets. Run:
+# BW64_SHELLSPAWN=/usr/bin/datecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-datecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-datecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/datecli" ]; then
+            echo "--- M17/S60: staged datecli at usr/bin/datecli ---"
+        fi
+    else
+        echo "WARNING: datecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
