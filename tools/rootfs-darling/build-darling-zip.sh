@@ -850,6 +850,30 @@ if [ -f "$APP_SRC/build-aescli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M22 (S65): b64cli — Base64 + URL percent-encoding via Foundation ----------
+# A fundamental encoding capability (pure Foundation, no networking). b64cli.m:
+# base64 encode/decode round trip via NSData; NSCharacterSet membership check; URL
+# percent-encode/decode round trip. EXERCISES the M17 CoreFoundation-by-path finding
+# (NSData/NSCharacterSet live in CF) — build-b64cli.sh links CoreFoundation BY PATH.
+# KEY GUEST API FINDING: this Cocotron Foundation predates the OS X 10.9 percent API
+# (+[NSCharacterSet URLQueryAllowedCharacterSet] and
+# stringByAddingPercentEncodingWithAllowedCharacters: are ABSENT — an initial probe
+# threw "unrecognized selector"). The probe uses the LEGACY percent-escape API the
+# guest DOES ship (stringByAddingPercentEscapesUsingEncoding: + Replacing) plus
+# +characterSetWithCharactersInString:. Installed at /usr/bin/b64cli. VERIFIED
+# M22/S65 (live): M22-B64-OK / M22-B64-DECODE-OK / M22-CSET-OK / M22-PCT-OK /
+# M22-PCT-DECODE-OK / M22-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/b64cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-b64cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-b64cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/b64cli" ]; then
+            echo "--- M22/S65: staged b64cli at usr/bin/b64cli ---"
+        fi
+    else
+        echo "WARNING: b64cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
