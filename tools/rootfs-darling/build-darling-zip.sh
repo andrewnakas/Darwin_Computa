@@ -874,6 +874,30 @@ if [ -f "$APP_SRC/build-b64cli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M23 (S66): scancli — NSScanner string tokenizing + NSUUID gen/round-trip --
+# Two fundamental Foundation capabilities (pure Foundation, no networking).
+# scancli.m: NSScanner scans an int / double / delimited token out of a structured
+# string (scanInt:/scanDouble:/scanUpToString:intoString:) and confirms isAtEnd;
+# NSUUID parses a known UUID string, verifies its 16 bytes vs the authoritative host
+# value, round-trips UUIDString, and confirms a generated +UUID is well-formed and
+# unique. ALL selectors were verified present in the staged guest binary before
+# authoring (the M22 lesson). NSScanner/charactersToBeSkipped pull in NSCharacterSet
+# (CF-resident) so build-scancli.sh links CoreFoundation BY PATH (the M17 finding).
+# Installed at /usr/bin/scancli. VERIFIED M23/S66 (live): M23-SCAN-INT-42 /
+# M23-SCAN-DBL-19.95 / M23-SCAN-TOK-Darwin / M23-SCAN-TAIL-OK /
+# M23-UUID-BYTES-OK / M23-UUID-ROUNDTRIP-OK / M23-UUID-GEN-OK / M23-DONE — a full
+# clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/scancli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-scancli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-scancli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/scancli" ]; then
+            echo "--- M23/S66: staged scancli at usr/bin/scancli ---"
+        fi
+    else
+        echo "WARNING: scancli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
