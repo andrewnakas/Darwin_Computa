@@ -1031,6 +1031,26 @@ if [ -f "$APP_SRC/build-strcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M30 (S73): datacli — NSData/NSMutableData binary buffer operations ---------
+# Binary-buffer manipulation (pure Foundation, no networking) — the layer under
+# every parser/serializer/codec. datacli.m: build via appendData:/appendBytes:,
+# slice via subdataWithRange:, search via rangeOfData:options:range:, patch in place
+# via replaceBytesInRange:withBytes:, read out via getBytes:range:. Selectors
+# pre-vetted (M22); NSData/NSMutableData are CF-resident so build-datacli.sh links
+# CoreFoundation BY PATH (M17). Installed at /usr/bin/datacli. VERIFIED M30/S73
+# (live): M30-LEN-14 / M30-BUILD-DARWIN COMPUTA / M30-SLICE-COMPUTA / M30-FIND-7 /
+# M30-PATCH-darwin COMPUTA / M30-GET-darwin / M30-DONE — a full clean pass (no gaps).
+# Run: BW64_SHELLSPAWN=/usr/bin/datacli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-datacli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-datacli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/datacli" ]; then
+            echo "--- M30/S73: staged datacli at usr/bin/datacli ---"
+        fi
+    else
+        echo "WARNING: datacli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
