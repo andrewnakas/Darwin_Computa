@@ -804,6 +804,29 @@ if [ -f "$APP_SRC/build-arccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M20 (S63): cryptocli — cryptographic digests + HMAC via modern libcrypto --
+# A fundamental, deterministic, headless capability (hashing underpins integrity,
+# signatures, content-addressing). cryptocli.m computes SHA-256 (one-shot AND via
+# the streaming EVP context API, confirming they match), MD5, and HMAC-SHA256,
+# each verified against authoritative host-computed hex. Uses the MODERN libcrypto
+# (the M4c lesson: libcrypto.44, NOT the ancient 0.9.x); in-guest that is actually
+# LibreSSL 2.8.3 under the OpenSSL-44 versioning, and the EVP/HMAC/SHA/MD5 paths all
+# work. build-cryptocli.sh links libcrypto.44 BY PATH and declares the C API extern
+# (no openssl headers staged; EVP_MD_CTX is an opaque handle, ABI-validated header-
+# free on host). Installed at /usr/bin/cryptocli. VERIFIED M20/S63 (live):
+# M20-SSLVER-LibreSSL 2.8.3 / M20-SHA256-OK / M20-EVP-MATCH-OK / M20-MD5-OK /
+# M20-HMAC-OK / M20-NSSTRING-OK / M20-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/cryptocli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cryptocli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cryptocli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cryptocli" ]; then
+            echo "--- M20/S63: staged cryptocli at usr/bin/cryptocli ---"
+        fi
+    else
+        echo "WARNING: cryptocli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
