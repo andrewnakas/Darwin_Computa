@@ -964,6 +964,29 @@ if [ -f "$APP_SRC/build-deccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M27 (S70): urlcli — NSString path manipulation + NSURL parse/compose -------
+# A fundamental Foundation capability (pure Foundation, no networking; NSURL here is
+# pure parsing, not fetching) complementing M16. urlcli.m: NSString path ops on
+# "/usr/local/bin/darwin.app" (lastPathComponent/pathExtension/deleteLast/append/
+# pathComponents) + NSURL parse of "https://example.com:8080/a/b/file.json?q=1"
+# (scheme/host/path/lastPathComponent) + fileURLWithPath:+URLByAppendingPathComponent:.
+# Selectors pre-vetted present (M22); NSURL is CF-resident so build-urlcli.sh links
+# CoreFoundation BY PATH (M17). Installed at /usr/bin/urlcli. VERIFIED M27/S70 (live):
+# M27-LAST-darwin.app / M27-EXT-app / M27-DELLAST-/usr/local/bin / M27-APPEND-.../Contents
+# / M27-NCOMP-5 / M27-URL-SCHEME-https / M27-URL-HOST-example.com /
+# M27-URL-PATH-/a/b/file.json / M27-URL-LAST-file.json / M27-FILEURL-OK / M27-DONE —
+# a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/urlcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-urlcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-urlcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/urlcli" ]; then
+            echo "--- M27/S70: staged urlcli at usr/bin/urlcli ---"
+        fi
+    else
+        echo "WARNING: urlcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
