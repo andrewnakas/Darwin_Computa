@@ -1009,6 +1009,28 @@ if [ -f "$APP_SRC/build-numcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M29 (S72): strcli — everyday NSString text processing ---------------------
+# Split/join/trim/case/search/replace (pure Foundation, no networking) — the plain
+# string-ops layer complementing M9 (regex) and M23 (NSScanner). strcli.m:
+# componentsSeparatedByString:/byCharactersInSet:, componentsJoinedByString:,
+# stringByTrimmingCharactersInSet:, upper/lowercaseString, rangeOfString:,
+# stringByReplacingOccurrencesOfString:, hasPrefix/hasSuffix. Selectors pre-vetted
+# (M22); char-set ops pull in NSCharacterSet so build-strcli.sh links CoreFoundation
+# BY PATH (M17). Installed at /usr/bin/strcli. VERIFIED M29/S72 (live): M29-SPLIT-4 /
+# M29-JOIN-a|b|c|d / M29-SPLITSET-3 / M29-TRIM-hi / M29-UPPER-DARWIN / M29-LOWER-darwin
+# / M29-FIND-7 / M29-REPLACE-DARWIN ROCKS / M29-PREFIX-1 / M29-DONE — a full clean
+# pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/strcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-strcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-strcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/strcli" ]; then
+            echo "--- M29/S72: staged strcli at usr/bin/strcli ---"
+        fi
+    else
+        echo "WARNING: strcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
