@@ -707,6 +707,26 @@ if [ -f "$APP_SRC/build-zcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M16 (S59): fmcli — real filesystem ops via NSFileManager -----------------
+# A fundamental userland capability (pure Foundation). fmcli.m exercises the core
+# NSFileManager API: createDirectoryAtPath / NSData writeToFile / fileExistsAtPath
+# isDirectory / contentsAtPath / contentsOfDirectoryAtPath / attributesOfItemAtPath.
+# VERIFIED M16/S59 (live): M16-MKDIR-OK / M16-WRITE-OK / M16-EXISTS-1 /
+# M16-READ-DARWIN / M16-LIST-1 / M16-ATTR-SIZE-14 / M16-DONE. KNOWN GAP (non-gating):
+# removeItemAtPath: fails — FsFileNode::remove() -> host unlink(nativePath) EPERM
+# (errno=1), independent of atomic/non-atomic write (M16-REMOVE-GAP-epermremove);
+# a future emulator VFS fix (source/io/fsfilenode.cpp). Run:
+# BW64_SHELLSPAWN=/usr/bin/fmcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-fmcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-fmcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/fmcli" ]; then
+            echo "--- M16/S59: staged fmcli at usr/bin/fmcli ---"
+        fi
+    else
+        echo "WARNING: fmcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
