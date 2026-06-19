@@ -920,6 +920,29 @@ if [ -f "$APP_SRC/build-predcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M25 (S68): archcli — object serialization via NSKeyedArchiver + plist ------
+# A fundamental persistence/IPC capability (pure Foundation, no networking):
+# archive an object graph to bytes and restore it. archcli.m: keyed-archive a nested
+# {string,number,array} dict via archivedDataWithRootObject:, unarchive it, confirm
+# deep equality + pull a string/number; plus a binary-plist round trip via
+# NSPropertyListSerialization. Uses the LEGACY archiving API (pre-secure-coding) the
+# guest ships (M22 vintage lesson); all selectors pre-vetted present. NSPropertyList
+# Serialization is CF-resident so build-archcli.sh links CoreFoundation BY PATH (M17).
+# Installed at /usr/bin/archcli. VERIFIED M25/S68 (live): M25-ARCH-OK /
+# M25-ARCH-STR-Darwin / M25-ARCH-NUM-42 / M25-PLIST-LEN-104 / M25-PLIST-OK /
+# M25-DONE — a full clean pass (no gaps; the keyed-archive byte length differs from
+# host, 448 vs 412, an encoding-overhead diff that does not affect the round trip).
+# Run: BW64_SHELLSPAWN=/usr/bin/archcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-archcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-archcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/archcli" ]; then
+            echo "--- M25/S68: staged archcli at usr/bin/archcli ---"
+        fi
+    else
+        echo "WARNING: archcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
