@@ -1527,6 +1527,30 @@ if [ -f "$APP_SRC/build-scan2cli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M53 (S96): deccli2 — NSDecimalNumber division + power-of-10 + comparison -----
+# Extends M26 (exact add/multiply) to division/scaling/compare (pure Foundation, no
+# networking). deccli2.m: exact no-handler division 1/4->"0.25" + 10/2->"5",
+# power-of-10 19.99*10^2->"1999", compare 3.33<3.34 -> -1. KNOWN GAP (non-gating, like
+# M17 ICU / M28 grouping): NSDecimalNumberHandler-controlled ROUNDING is broken under
+# emulation — a first probe used decimalNumberByDividingBy:withBehavior: (plain
+# rounding, scale 2) and the guest IGNORED the scale (10/3 -> "3.33333" not "3.33")
+# and misinterpreted the handler arg (1/8 -> "0.0922337" not "0.13"). Reworked to gate
+# on the working paths + surface M53-HANDLER-GAP-norounding. Workaround: scale by
+# powers of 10 (the POW path works). Selectors pre-vetted (M22); CF by-path (M17).
+# Installed at /usr/bin/deccli2. VERIFIED M53/S96 (live): M53-DIV4-0.25 / M53-DIV2-5 /
+# M53-POW-1999 / M53-CMP--1 / M53-HANDLER-GAP-norounding / M53-DONE — gating facets a
+# full clean pass; handler-rounding a documented gap. Run:
+# BW64_SHELLSPAWN=/usr/bin/deccli2 bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-deccli2.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-deccli2.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/deccli2" ]; then
+            echo "--- M53/S96: staged deccli2 at usr/bin/deccli2 ---"
+        fi
+    else
+        echo "WARNING: deccli2 build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
