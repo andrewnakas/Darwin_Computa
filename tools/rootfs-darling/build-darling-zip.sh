@@ -1683,6 +1683,27 @@ if [ -f "$APP_SRC/build-dsrccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M60 (S104): cfsetcli — CFSet + CFBag via the CoreFoundation C API ------------
+# Extends the CF C-layer (M44 CFUUID/CFString, M45 CFArray/CFDictionary/CFNumber,
+# M46 CFData) to the SET + MULTISET container types — the pure-C counterparts to
+# M34's NSSet and M26's NSCountedSet. PURE-C probe (no #import) per the M44 trick;
+# symbols + callback structs (kCFTypeSetCallBacks/kCFTypeBagCallBacks) pre-vetted
+# (M22); CoreFoundation BY PATH (M17). cfsetcli.m: CFSet dedup {alpha,beta,gamma,beta}
+# -> 3 + CFSetContainsValue, CFMutableSet add2/remove1 -> 1, CFBag {a,a,a,b,b,c} ->
+# total 6 with CFBagGetCountOfValue a=3/c=1. Installed at /usr/bin/cfsetcli. VERIFIED
+# M60/S104 (live, matches host): M60-SETCOUNT-3 / M60-SETHAS-1 / M60-SETNO-0 /
+# M60-MUTSET-1 / M60-BAGTOTAL-6 / M60-BAGA-3 / M60-BAGC-1 / M60-DONE — full clean pass.
+# Run: BW64_SHELLSPAWN=/usr/bin/cfsetcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cfsetcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cfsetcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cfsetcli" ]; then
+            echo "--- M60/S104: staged cfsetcli at usr/bin/cfsetcli ---"
+        fi
+    else
+        echo "WARNING: cfsetcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
