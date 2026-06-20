@@ -1295,6 +1295,26 @@ if [ -f "$APP_SRC/build-caldiffcli.sh" ] && command -v clang >/dev/null 2>&1; th
     fi
 fi
 
+# --- M42 (S85): recap — NSRegularExpression capture groups + template replacement -
+# A DEEPER regex exercise than M9's basic matching (pure Foundation, no networking):
+# numbered capture-group extraction, multi-match counting, and $1-style template
+# (backreference) replacement. recap.m: (\w+)=(\d+) on "qty=42" -> CAP1 "qty"/CAP2 "42"
+# /NRANGES 3, \d+ count in "a1 b22 c333" (3), template "$2:$1" -> "42:qty", global
+# "$2=$1" on "x=1 y=2" -> "1=x 2=y". Selectors pre-vetted (M22); CF by-path (M17).
+# Installed at /usr/bin/recap. VERIFIED M42/S85 (live, matches host exactly):
+# M42-CAP1-qty / M42-CAP2-42 / M42-NRANGES-3 / M42-COUNT-3 / M42-TEMPLATE-42:qty /
+# M42-GLOBAL-1=x 2=y / M42-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/recap bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-recap.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-recap.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/recap" ]; then
+            echo "--- M42/S85: staged recap at usr/bin/recap ---"
+        fi
+    else
+        echo "WARNING: recap build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
