@@ -1659,6 +1659,30 @@ if [ -f "$APP_SRC/build-kvccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M59 (S103): dsrccli — GCD dispatch_source event sources (timer + data) -------
+# Extends the GCD tier (M55 queues/apply, M56 group/after/barrier) to dispatch_source,
+# the libdispatch event-source primitive. Pure C dispatch API + blocks (M54); no net.
+# libdispatch staged + re-exported by libSystem (M55); CoreFoundation BY PATH (M17);
+# symbols pre-vetted (M22). dsrccli.m: create a TIMER source + a DATA_ADD source,
+# deliver handlers, coalesce merge_data 5+7+30 -> get_data 42, and run a cancel handler.
+# Installed at /usr/bin/dsrccli. VERIFIED M59/S103 (live) on the GATING facets:
+# M59-SOURCE-OK (create + handler delivery) / M59-DATA-42 / M59-DATA-OK (coalescing) /
+# M59-CANCEL-OK / M59-DONE. KNOWN GUEST GAP (non-gating, same class as M36's repeating
+# NSTimer): a DISPATCH_SOURCE_TYPE_TIMER fires ONCE and does not re-arm — macOS
+# kqueue/EVFILT_TIMER is serviced via Darling libkqueue over Mach traps and the
+# periodic rearm isn't driven by the substrate (M59-TIMER-GAP-fireonce); a deep
+# multi-session libkqueue fix. Run:
+# BW64_SHELLSPAWN=/usr/bin/dsrccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-dsrccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-dsrccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/dsrccli" ]; then
+            echo "--- M59/S103: staged dsrccli at usr/bin/dsrccli ---"
+        fi
+    else
+        echo "WARNING: dsrccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
