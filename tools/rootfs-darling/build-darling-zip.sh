@@ -1360,6 +1360,26 @@ if [ -f "$APP_SRC/build-cfuuidcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M45 (S88): cfcollcli — CFArray + CFDictionary + CFNumber via the CF C API ----
+# Extends M44's CF C-layer proof to the CONTAINER types (pure-C, NO ObjC runtime):
+# build a CFArray of CFStrings + a CFDictionary of CFString->CFNumber via the pure-C
+# interface, read count/indexed value/key lookup — exercising the CF retain/callback
+# machinery (kCFTypeArrayCallBacks etc.). cfcollcli.m is a PURE-C probe (no #import
+# <Foundation>) per the M44 trick; symbols pre-vetted exported (M22); CF linked BY
+# PATH (M17). Installed at /usr/bin/cfcollcli. VERIFIED M45/S88 (live, matches host
+# exactly): M45-ARRCOUNT-3 / M45-ARRIDX-OK / M45-DICTCOUNT-2 / M45-DICTVAL-42 /
+# M45-DICTVAL-OK / M45-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/cfcollcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cfcollcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cfcollcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cfcollcli" ]; then
+            echo "--- M45/S88: staged cfcollcli at usr/bin/cfcollcli ---"
+        fi
+    else
+        echo "WARNING: cfcollcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
