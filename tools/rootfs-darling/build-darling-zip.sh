@@ -1336,6 +1336,30 @@ if [ -f "$APP_SRC/build-csetcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M44 (S87): cfuuidcli — CFUUID + CFString via the CoreFoundation C API -------
+# The CF C-layer counterpart to M23's NSUUID (pure-C path, NO ObjC runtime). Proves
+# the CoreFoundation C API works on the substrate independent of the ObjC bridge.
+# cfuuidcli.m: CFUUIDCreate -> CFUUIDCreateString (36-char "8-4-4-4-12"), two differ,
+# CFUUIDCreateFromString on a known UUID -> CFUUIDGetUUIDBytes == known bytes. A
+# PURE-C probe (no #import <Foundation>) to avoid an SDK-header collision (Foundation
+# umbrella pulls in the real CFUUID.h, conflicting with our extern decls) — keeps the
+# guest build header-free + host-validatable; CFUUIDBytes mirrored as a 16-byte
+# MyCFUUIDBytes (ABI validated header-free on host). Symbols pre-vetted exported (M22);
+# CF linked BY PATH (M17). Installed at /usr/bin/cfuuidcli. VERIFIED M44/S87 (live):
+# M44-CFVER-1153 / M44-GENLEN-36 / M44-DASHES-4 / M44-UNIQUE-OK /
+# M44-BYTES-0123456789ab4cde8f0123456789abcd / M44-BYTES-OK / M44-DONE — a full clean
+# pass (CFVER differs from host, just proves the C lib is live). Run:
+# BW64_SHELLSPAWN=/usr/bin/cfuuidcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cfuuidcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cfuuidcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cfuuidcli" ]; then
+            echo "--- M44/S87: staged cfuuidcli at usr/bin/cfuuidcli ---"
+        fi
+    else
+        echo "WARNING: cfuuidcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
