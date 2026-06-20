@@ -1573,6 +1573,28 @@ if [ -f "$APP_SRC/build-blkcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M55 (S98): gcdcli — Grand Central Dispatch (libdispatch) C API --------------
+# A major Darwin concurrency subsystem (builds on M54's block runtime; distinct from
+# M36's NSRunLoop): dispatch a block to a queue + semaphore handoff, serial
+# dispatch_sync, and parallel dispatch_apply. gcdcli.m: dispatch_async to a concurrent
+# queue sets a value + signals a semaphore the main thread waits on (ASYNC-42),
+# dispatch_sync on a serial queue (SYNC-OK), dispatch_apply(5) summing indices guarded
+# by a serial queue (APPLY-10). libdispatch is staged + re-exported by libSystem; the
+# block runtime is libsystem_blocks (M54). Symbols pre-vetted exported (M22); CF
+# by-path (M17). Installed at /usr/bin/gcdcli. VERIFIED M55/S98 (live, matches host
+# exactly): M55-ASYNC-42 / M55-ASYNC-OK / M55-SYNC-OK / M55-APPLY-10 / M55-DONE — a
+# full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/gcdcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-gcdcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-gcdcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/gcdcli" ]; then
+            echo "--- M55/S98: staged gcdcli at usr/bin/gcdcli ---"
+        fi
+    else
+        echo "WARNING: gcdcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
