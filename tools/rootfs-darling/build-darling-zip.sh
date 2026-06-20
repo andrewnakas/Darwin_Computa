@@ -1249,6 +1249,29 @@ if [ -f "$APP_SRC/build-csvcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M40 (S83): errcli — NSError out-param + ObjC @try/@catch/@throw -------------
+# The error-handling substrate every robust program relies on (pure Foundation + the
+# ObjC exception runtime, no networking). errcli.m: construct/read an NSError
+# (domain/code/localizedDescription), propagate one through an (NSError**) out-param,
+# and @throw/@catch/@finally an NSException (name/reason), confirming control resumes.
+# The ObjC exception helpers (objc_exception_throw/begin_catch/end_catch) are exported
+# by the staged libobjc, so @throw/@catch work. NSError/NSException are CF-resident +
+# NSLocalizedDescriptionKey is a CF const, so build-errcli.sh links CoreFoundation BY
+# PATH (M17). Selectors pre-vetted (M22). Installed at /usr/bin/errcli. VERIFIED
+# M40/S83 (live, matches host exactly): M40-ERR-DOMAIN-DarwinComputa / M40-ERR-CODE-42
+# / M40-ERR-DESC-boom / M40-OUTPARAM-OK / M40-CATCH-DarwinError /
+# M40-CATCH-REASON-deliberate / M40-AFTER-OK / M40-DONE — a full clean pass (no gaps).
+# Run: BW64_SHELLSPAWN=/usr/bin/errcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-errcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-errcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/errcli" ]; then
+            echo "--- M40/S83: staged errcli at usr/bin/errcli ---"
+        fi
+    else
+        echo "WARNING: errcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
