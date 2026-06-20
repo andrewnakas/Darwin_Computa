@@ -1506,6 +1506,27 @@ if [ -f "$APP_SRC/build-bytecli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M52 (S95): scan2cli — deeper NSScanner scanning (float/hex/longlong/charset) -
+# Extends M23 (int/double/token) to numeric-format + charset-driven scanning (pure
+# Foundation, no networking). scan2cli.m: scanFloat: "3.14rest"->3.14, scanHexInt:
+# "0x2A"->42, scanLongLong: "9000000000" (>32-bit), scanCharactersFromSet:letters
+# "abcDEF123"->"abcDEF", scanUpToCharactersFromSet:digits "name=123"->"name=".
+# NSScanner pulls in NSCharacterSet (CF-resident) so build-scan2cli.sh links
+# CoreFoundation BY PATH (M17). Selectors pre-vetted (M22). Installed at
+# /usr/bin/scan2cli. VERIFIED M52/S95 (live, matches host exactly): M52-FLOAT-3.14 /
+# M52-HEX-42 / M52-LL-9000000000 / M52-CHARS-abcDEF / M52-UPTO-name= / M52-DONE — a
+# full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/scan2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-scan2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-scan2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/scan2cli" ]; then
+            echo "--- M52/S95: staged scan2cli at usr/bin/scan2cli ---"
+        fi
+    else
+        echo "WARNING: scan2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
