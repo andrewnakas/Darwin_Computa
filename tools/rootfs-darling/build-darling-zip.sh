@@ -1551,6 +1551,28 @@ if [ -f "$APP_SRC/build-deccli2.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M54 (S97): blkcli — Obj-C BLOCKS through Foundation block-based APIs ---------
+# Proves the Obj-C BLOCK/CLOSURE runtime works on the substrate (pure Foundation + the
+# block runtime, no networking) — a distinct runtime feature underpinning modern Cocoa
+# block APIs. blkcli.m: sortedArrayUsingComparator: (descending block), indexOfObject
+# PassingTest: (predicate block), enumerateObjectsUsingBlock: (__block accumulator),
+# enumerateKeysAndObjectsUsingBlock: (dict block). The block runtime symbols
+# (__NSConcreteStackBlock/__NSConcreteGlobalBlock, Block_copy/release) are defined in
+# libsystem_blocks.dylib + re-exported by libSystem, so blocks link+run. Selectors
+# pre-vetted (M22); CF by-path (M17). Installed at /usr/bin/blkcli. VERIFIED M54/S97
+# (live, matches host exactly): M54-SORT-3,2,1 / M54-FINDIDX-1 / M54-SUM-6 /
+# M54-DICTSUM-42 / M54-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/blkcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-blkcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-blkcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/blkcli" ]; then
+            echo "--- M54/S97: staged blkcli at usr/bin/blkcli ---"
+        fi
+    else
+        echo "WARNING: blkcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
