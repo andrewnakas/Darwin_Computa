@@ -1380,6 +1380,28 @@ if [ -f "$APP_SRC/build-cfcollcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M46 (S89): cfdatacli — CFData + CFString operations via the CF C API --------
+# Extends the CF C-layer (M44 CFUUID/CFString-create, M45 containers) to DATA BUFFERS
+# + STRING OPS (pure-C, NO ObjC runtime): CFMutableData append/read + CFString find/
+# substring/prefix. cfdatacli.m: CFDataCreateMutable + CFDataAppendBytes "DARWIN"/
+# " COMPUTA" -> len 14 + byte compare, CFStringFindWithOptions "COMP" -> 7,
+# CFStringCreateWithSubstring {7,7} -> "COMPUTA", CFStringHasPrefix "DARWIN". PURE-C
+# probe per the M44 trick; CFRange mirrored (16-byte struct, ABI-validated header-free
+# on host); symbols pre-vetted exported (M22); CF linked BY PATH (M17). Installed at
+# /usr/bin/cfdatacli. VERIFIED M46/S89 (live, matches host exactly): M46-DATALEN-14 /
+# M46-DATA-OK / M46-FIND-7 / M46-SUBSTR-OK / M46-PREFIX-1 / M46-DONE — a full clean
+# pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/cfdatacli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cfdatacli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cfdatacli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cfdatacli" ]; then
+            echo "--- M46/S89: staged cfdatacli at usr/bin/cfdatacli ---"
+        fi
+    else
+        echo "WARNING: cfdatacli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
