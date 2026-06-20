@@ -1615,6 +1615,29 @@ if [ -f "$APP_SRC/build-gcd2cli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M57 (S100): parcli — CONCURRENCY SYNTHESIS (JSON -> parallel map -> HMAC) ----
+# The first synthesis exercising the GCD tier: a "parallel-process -> aggregate ->
+# sign" pipeline composing NSJSONSerialization (M7) -> dispatch_apply parallel map
+# (M55) + dispatch_barrier_sync guarded accumulate (M56) -> HMAC-SHA256 (M20), proving
+# GCD concurrency interoperates with the data + crypto tiers. parcli.m parses JSON
+# {score} records, processes them CONCURRENTLY (square each + sum under a barrier on a
+# concurrent queue), then HMAC-SHA256s the decimal sum string (fixed key) verified vs
+# the authoritative host hex. Links Foundation + CoreFoundation (M17) + libcrypto.44
+# (M20) by path; libdispatch + block runtime via libSystem re-exports. Symbols
+# pre-vetted (M22). Installed at /usr/bin/parcli. VERIFIED M57/S100 (live, matches host
+# exactly): M57-PARSE-4 / M57-SUM-3000 / M57-SUM-OK / M57-HMAC-OK / M57-DONE — a full
+# clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/parcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-parcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-parcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/parcli" ]; then
+            echo "--- M57/S100: staged parcli at usr/bin/parcli ---"
+        fi
+    else
+        echo "WARNING: parcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
