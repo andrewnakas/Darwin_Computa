@@ -93,7 +93,24 @@ bool FsFileNode::remove() {
     if (exists) {
         BString dosAttrib = nativePath + EXT_DOSATTRIB;
         unlink(dosAttrib.c_str());
-        result = unlink(nativePath.c_str()) == 0;        
+        // M16 removal fix: remove() is the generic removal primitive (it backs the
+        // guest unlink syscall AND glibc remove(3), which NSFileManager's
+        // removeItemAtPath: routes through). On a directory, host unlink() returns
+        // EPERM on macOS / EISDIR on Linux, so a directory could never be removed and
+        // removeItemAtPath: of a dir failed (the M16 gap). glibc remove(3) dispatches
+        // unlink-vs-rmdir by node type; mirror that here so directories use rmdir().
+        if (this->isDirectory() && !this->isLink()) {
+            result = rmdir(nativePath.c_str()) == 0;
+        } else {
+            result = unlink(nativePath.c_str()) == 0;
+        }
+        if (!result) {
+            // Surface the real errno + nativePath on a genuine failure (e.g. a
+            // non-empty dir -> ENOTEMPTY, or a still-open file handled by the
+            // rename-to-/tmp/del fallback below).
+            klog_fmt("FsFileNode::remove %s('%s') failed errno=%d",
+                     this->isDirectory() ? "rmdir" : "unlink", nativePath.c_str(), errno);
+        }
     }
     // if the file failed to be deleted and it exists then its because someone else has it open, 
     // so we need to close all references, move the file then re-open the file for those handles

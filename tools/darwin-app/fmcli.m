@@ -14,11 +14,26 @@
  *   M16-READ-DARWIN        contents read back == original ("DARWIN COMPUTA")
  *   M16-LIST-<n>           contentsOfDirectoryAtPath: enumerated n entries
  *   M16-ATTR-SIZE-<n>      attributesOfItemAtPath: NSFileSize
- *   M16-REMOVE-OK          removeItemAtPath: + fileExistsAtPath now false
+ *   M16-REMOVEDIR-OK       removeItemAtPath: on a DIRECTORY (the emulator fix below)
  *   M16-DONE
+ *
+ * EMULATOR FIX (S102): directory removal was the long-standing M16 gap. Root cause
+ * (proven by this probe, not the earlier guess): FsFileNode::remove() called host
+ * unlink() unconditionally; unlink() of a directory returns EPERM on macOS, so
+ * removeItemAtPath: of a dir always failed. FIXED in source/io/fsfilenode.cpp by
+ * dispatching directories to rmdir() (mirroring glibc remove(3)). Now M16-REMOVEDIR-OK.
+ *
+ * REMAINING (Cocotron Foundation gap, NOT the substrate): removeItemAtPath: of a
+ * regular FILE still fails with NSPOSIXErrorDomain ENOTDIR(20). Cocotron's
+ * removeItemAtPath: enumerates every path via opendir/readdir_r to recurse; on a
+ * plain file opendir correctly returns ENOTDIR and Cocotron mishandles it as fatal
+ * instead of just unlinking. The substrate VFS is correct — a raw unlink() of the
+ * SAME path succeeds (M16-REMOVE-RAWUNLINK-0). Un-fixable without recompiling
+ * Cocotron (same class as the other documented Cocotron gaps); reported as a GAP.
  */
 #import <Foundation/Foundation.h>
 #include <stdio.h>
+#include <errno.h>
 
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
@@ -72,8 +87,29 @@ int main(int argc, const char* argv[]) {
          * work. We report it as a GAP, not a failure, so the milestone gate is the
          * proven read/write/create/enumerate/attributes path. (Future emulator fix:
          * source/io/fsfilenode.cpp FsFileNode::remove unlink EPERM under the overlay.) */
+        err = nil;
         BOOL rmFile = [fm removeItemAtPath:file error:&err];
         printf("M16-REMOVE-%s\n", rmFile ? "OK" : "GAP-epermremove"); fflush(stdout);
+        if (!rmFile) {
+            /* surface the NSError so we can see WHAT failed (domain/code) */
+            printf("M16-REMOVE-ERR-%s-%ld\n",
+                   err ? [[err domain] UTF8String] : "nil",
+                   err ? (long)[err code] : -999L); fflush(stdout);
+            /* also probe a RAW posix unlink to see if the syscall path itself works */
+            extern int unlink(const char*);
+            errno = 0;
+            int ru = unlink("/var/root/m16dir/note.txt");
+            printf("M16-REMOVE-RAWUNLINK-%d-errno-%d\n", ru, errno); fflush(stdout);
+        }
+        /* also test removing the (now-empty if raw unlink worked) DIRECTORY */
+        err = nil;
+        BOOL rmDir = [fm removeItemAtPath:dir error:&err];
+        printf("M16-REMOVEDIR-%s\n", rmDir ? "OK" : "GAP"); fflush(stdout);
+        if (!rmDir) {
+            printf("M16-REMOVEDIR-ERR-%s-%ld\n",
+                   err ? [[err domain] UTF8String] : "nil",
+                   err ? (long)[err code] : -999L); fflush(stdout);
+        }
 
         printf("M16-DONE\n"); fflush(stdout);
     }
