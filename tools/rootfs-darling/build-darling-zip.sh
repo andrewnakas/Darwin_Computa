@@ -1205,6 +1205,28 @@ if [ -f "$APP_SRC/build-fhcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M38 (S81): enccli — NSString text encoding conversion + encoded file I/O -----
+# Encoding-conversion machinery (pure Foundation, no networking): UTF-8/UTF-16 byte
+# lengths, NSData round-trip, ASCII-convertibility, and writing/reading a UTF-8 text
+# file with a multi-byte char — distinct from M22 (base64/percent) and M29 (plain
+# string ops). enccli.m on "Darwin café": lengthOfBytesUsingEncoding: UTF8 (12) /
+# UTF16 (22), dataUsingEncoding:+initWithData:encoding: round trip, canBeConvertedTo
+# Encoding:ASCII (NO — the é blocks it), writeToFile:encoding:UTF8 +
+# stringWithContentsOfFile:encoding:. Avoids the M16 removeItemAtPath gap. Selectors
+# pre-vetted (M22); CF by-path (M17). Installed at /usr/bin/enccli. VERIFIED M38/S81
+# (live, matches host exactly): M38-UTF8LEN-12 / M38-UTF16LEN-22 / M38-ROUNDTRIP-OK /
+# M38-ASCII-0 / M38-FILE-OK / M38-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/enccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-enccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-enccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/enccli" ]; then
+            echo "--- M38/S81: staged enccli at usr/bin/enccli ---"
+        fi
+    else
+        echo "WARNING: enccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
