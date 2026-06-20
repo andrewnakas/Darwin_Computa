@@ -1486,6 +1486,26 @@ if [ -f "$APP_SRC/build-reportcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M51 (S94): bytecli — NSByteCountFormatter human-readable byte-count formatting -
+# Turns raw byte counts into "512 bytes"/"1 KB"/"1 MB"-style strings (pure Foundation,
+# no networking) — the formatter every file/download UI uses. bytecli.m: decimal
+# count style on 512/1500/1500000, plus includesUnit:NO. Gating is STRUCTURAL
+# (unit-substring checks: "byte"/"KB"/"MB") to stay robust against the guest's ICU/
+# locale quirks. Selectors pre-vetted (M22); CF by-path (M17). Installed at
+# /usr/bin/bytecli. VERIFIED M51/S94 (live, matches host exactly): M51-B512-512 bytes /
+# M51-B512-OK / M51-KB-1 KB / M51-KB-OK / M51-MB-OK / M51-NOUNIT-OK / M51-DONE — a
+# full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/bytecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-bytecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-bytecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/bytecli" ]; then
+            echo "--- M51/S94: staged bytecli at usr/bin/bytecli ---"
+        fi
+    else
+        echo "WARNING: bytecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
