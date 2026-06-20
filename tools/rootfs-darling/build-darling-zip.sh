@@ -1272,6 +1272,29 @@ if [ -f "$APP_SRC/build-errcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M41 (S84): caldiffcli — NSCalendar date-from-components + date-difference ----
+# The INVERSE of M17: build a date from explicit Y/M/D components and compute the
+# span between two dates (pure Foundation, no networking; avoids the M17 ICU weekday
+# gap — no weekday facet). caldiffcli.m: dateFromComponents: to build 2026-01-15 and
+# 2026-02-24, round-trip via components:fromDate:, then components:fromDate:toDate:
+# for the day span (40) and month+day span (1 month, 9 days), plus a compare:.
+# @"gregorian" + UTC (per M17). NSCalendar/NSDateComponents are CF-resident so
+# build-caldiffcli.sh links CoreFoundation BY PATH (M17). Selectors pre-vetted (M22;
+# -[NSDateComponents day] confirmed via the method table). Installed at
+# /usr/bin/caldiffcli. VERIFIED M41/S84 (live, matches host exactly):
+# M41-BUILDA-2026-1-15 / M41-BUILDB-2026-2-24 / M41-DIFFDAYS-40 / M41-DIFFMON-1-9 /
+# M41-ORDER-OK / M41-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/caldiffcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-caldiffcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-caldiffcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/caldiffcli" ]; then
+            echo "--- M41/S84: staged caldiffcli at usr/bin/caldiffcli ---"
+        fi
+    else
+        echo "WARNING: caldiffcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
