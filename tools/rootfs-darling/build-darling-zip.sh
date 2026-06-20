@@ -1443,6 +1443,26 @@ if [ -f "$APP_SRC/build-idxcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M49 (S92): valcli — NSValue boxing of C structs (NSRange/NSPoint/NSSize) -----
+# The Foundation pattern for putting non-object C structs into object collections
+# (pure Foundation, no networking): box a struct in an NSValue, store it in an
+# NSArray, pull it back, unbox, and compare. valcli.m: valueWithRange:/rangeValue,
+# valueWithPoint:/pointValue, valueWithSize:/sizeValue, isEqualToValue:, and NSArray
+# storage+retrieval. Selectors pre-vetted (M22); CF by-path (M17). Installed at
+# /usr/bin/valcli. VERIFIED M49/S92 (live, matches host exactly): M49-RANGE-3-7 /
+# M49-POINT-1.5-2.5 / M49-SIZE-40-80 / M49-EQ-1 / M49-ARR-POINT-1.5-2.5 / M49-DONE —
+# a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/valcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-valcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-valcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/valcli" ]; then
+            echo "--- M49/S92: staged valcli at usr/bin/valcli ---"
+        fi
+    else
+        echo "WARNING: valcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
