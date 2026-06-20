@@ -1227,6 +1227,28 @@ if [ -f "$APP_SRC/build-enccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M39 (S82): csvcli — CLI SYNTHESIS #4 (file -> split -> decimal sum -> JSON) --
+# A realistic "ingest a data file, compute, emit JSON" pipeline (pure Foundation, no
+# networking) composing four proven capabilities: NSFileHandle read (M37) ->
+# NSString split (M29) -> NSDecimalNumber exact sum (M26) -> NSJSONSerialization (M7).
+# csvcli.m writes a CSV-ish file, reads it via a file handle, splits rows/fields, sums
+# the amount column with exact decimal math (19.99+12.50+31.35=63.84), and emits
+# {count,total,names} as JSON with a round-trip check. Pure Foundation +
+# CoreFoundation BY PATH (M17); avoids the M16 remove gap. Installed at /usr/bin/csvcli.
+# VERIFIED M39/S82 (live, matches host exactly): M39-READ-47 / M39-ROWS-3 /
+# M39-TOTAL-63.84 / M39-JSON-{"count":3,"total":"63.84",...} / M39-JSON-OK /
+# M39-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/csvcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-csvcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-csvcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/csvcli" ]; then
+            echo "--- M39/S82: staged csvcli at usr/bin/csvcli ---"
+        fi
+    else
+        echo "WARNING: csvcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
