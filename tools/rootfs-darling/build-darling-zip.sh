@@ -1704,6 +1704,27 @@ if [ -f "$APP_SRC/build-cfsetcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M61 (S105): opqcli — NSOperationQueue + NSBlockOperation ---------------------
+# The higher-level Cocoa concurrency abstraction ABOVE GCD (M55-M57): an operation
+# queue schedules NSOperation objects honoring inter-operation DEPENDENCIES and a
+# max-concurrency cap, blocking until all finish. Pure Foundation (M3) + block runtime
+# (M54); no net. Selectors + classes pre-vetted (M22); CoreFoundation BY PATH (M17).
+# opqcli.m: serial queue (maxConcurrent 1) runs 3 addOperationWithBlock: ops (RAN-3);
+# dependency graph opA->opB->opC forces order CBA despite reverse add-order (ORDER-CBA);
+# a directly-started NSBlockOperation runs its block (BLOCKOP-OK). Installed at
+# /usr/bin/opqcli. VERIFIED M61/S105 (live, matches host): M61-RAN-3 / M61-ORDER-CBA /
+# M61-BLOCKOP-OK / M61-DONE — full clean pass, NSOperation dependency resolution works.
+# Run: BW64_SHELLSPAWN=/usr/bin/opqcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-opqcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-opqcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/opqcli" ]; then
+            echo "--- M61/S105: staged opqcli at usr/bin/opqcli ---"
+        fi
+    else
+        echo "WARNING: opqcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
