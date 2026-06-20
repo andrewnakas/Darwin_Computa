@@ -1315,6 +1315,27 @@ if [ -f "$APP_SRC/build-recap.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M43 (S86): csetcli — NSCharacterSet predefined classes + membership/inversion -
+# Deepens NSCharacterSet coverage (pure Foundation, no networking) beyond M22
+# (membership) / M29 (splitting): the PREDEFINED class sets + inverted-set semantics.
+# csetcli.m: decimalDigit/letter/whitespace/alphanumeric character classes, a custom
+# characterSetWithCharactersInString:, and invertedSet — each via characterIsMember:.
+# Uses the pre-10.9 class methods the guest ships (the 10.9 URL* sets are ABSENT per
+# M22). Selectors pre-vetted (M22); CF by-path (M17). Installed at /usr/bin/csetcli.
+# VERIFIED M43/S86 (live, matches host exactly): M43-DIGIT-1 / M43-LETTER-1 /
+# M43-WS-1 / M43-ALNUM-1 / M43-CUSTOM-1 / M43-INVERTED-1 / M43-DONE — a full clean
+# pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/csetcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-csetcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-csetcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/csetcli" ]; then
+            echo "--- M43/S86: staged csetcli at usr/bin/csetcli ---"
+        fi
+    else
+        echo "WARNING: csetcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
