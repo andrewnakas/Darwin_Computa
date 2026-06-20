@@ -1402,6 +1402,27 @@ if [ -f "$APP_SRC/build-cfdatacli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M47 (S90): fmtcli — NSString formatting + NSMutableString building ----------
+# The string-construction layer (pure Foundation, no networking), distinct from M29
+# (split/search/case) and M38 (encodings). fmtcli.m: stringWithFormat: with mixed
+# specifiers (%@/%d/%.2f/%x), NSMutableString appendString:/appendFormat:/
+# insertString:atIndex:/replaceCharactersInRange:withString:, and
+# stringByPaddingToLength:. Selectors pre-vetted (M22); NSString/NSMutableString are
+# CF-resident so build-fmtcli.sh links CoreFoundation BY PATH (M17). Installed at
+# /usr/bin/fmtcli. VERIFIED M47/S90 (live, matches host exactly):
+# M47-FMT-Darwin #42 = 19.99 [2a] / M47-APPEND-DARWIN v2 / M47-INSERT-<<DARWIN v2 /
+# M47-REPLACE->>DARWIN v2 / M47-PAD-Darwin.. / M47-DONE — a full clean pass (no gaps).
+# Run: BW64_SHELLSPAWN=/usr/bin/fmtcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-fmtcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-fmtcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/fmtcli" ]; then
+            echo "--- M47/S90: staged fmtcli at usr/bin/fmtcli ---"
+        fi
+    else
+        echo "WARNING: fmtcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
