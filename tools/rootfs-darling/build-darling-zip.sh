@@ -1638,6 +1638,27 @@ if [ -f "$APP_SRC/build-parcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M58 (S101): kvccli — Key-Value Coding (KVC) + block-based NSPredicate --------
+# KVC is a core Cocoa mechanism (backbone of bindings/Core Data/AppKit), pure
+# Foundation + the block runtime (M54), no networking. kvccli.m: valueForKey:"name"
+# (KEY-beta), nested valueForKeyPath:"inner.x" (KEYPATH-7), KVC collection operators
+# @sum/@avg/@max.score over an array of dicts (SUM-90/AVG-30/MAX-50), and
+# predicateWithBlock: score>25 (BLOCKPRED-2). Selectors pre-vetted (M22); NSArray/
+# NSDictionary CF-resident so build-kvccli.sh links CoreFoundation BY PATH (M17); block
+# runtime via libSystem (M54). Installed at /usr/bin/kvccli. VERIFIED M58/S101 (live,
+# matches host exactly): M58-KEY-beta / M58-KEYPATH-7 / M58-SUM-90 / M58-AVG-30 /
+# M58-MAX-50 / M58-BLOCKPRED-2 / M58-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/kvccli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-kvccli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-kvccli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/kvccli" ]; then
+            echo "--- M58/S101: staged kvccli at usr/bin/kvccli ---"
+        fi
+    else
+        echo "WARNING: kvccli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
