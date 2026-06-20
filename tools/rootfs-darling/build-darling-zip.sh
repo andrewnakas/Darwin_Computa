@@ -1725,6 +1725,30 @@ if [ -f "$APP_SRC/build-opqcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M62 (S106): cachecli — NSCache in-memory key/value cache --------------------
+# NSCache is Foundation's thread-safe, auto-evicting object cache (the store behind
+# image/data caches in real apps), distinct from NSDictionary in its cache semantics
+# (cost accounting, eviction). Pure Foundation (M3); no net. Selectors pre-vetted
+# (M22) — NOTE setCountLimit:/countLimit are ABSENT in this Cocotron Foundation, so
+# cachecli.m uses only the present selectors. CoreFoundation BY PATH (M17). cachecli.m:
+# store 3 / read back (GET-beta), missing-key nil (MISS-1), setObject:forKey:cost:
+# (COST-gamma), removeObjectForKey: (REMOVE-1) leaving others (REMAIN-beta),
+# removeAllObjects (REMOVEALL-1). Installed at /usr/bin/cachecli. VERIFIED M62/S106
+# (live, matches host): M62-GET-beta / M62-MISS-1 / M62-COST-gamma / M62-REMOVE-1 /
+# M62-REMAIN-beta / M62-REMOVEALL-1 / M62-DONE — full clean pass. (NSXMLDocument was
+# tried first for M62 but is a Darling Foundation STUB — initWithXMLString: logs
+# "unimplemented" + returns nil, like CoreData M6; tree-XML is served by M18.) Run:
+# BW64_SHELLSPAWN=/usr/bin/cachecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-cachecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-cachecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/cachecli" ]; then
+            echo "--- M62/S106: staged cachecli at usr/bin/cachecli ---"
+        fi
+    else
+        echo "WARNING: cachecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
