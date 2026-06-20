@@ -1184,6 +1184,27 @@ if [ -f "$APP_SRC/build-timercli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M37 (S80): fhcli — NSFileHandle descriptor-level file I/O -------------------
+# Streaming FD-level read/write/seek over a real on-disk file (pure Foundation, no
+# networking) — completes the file-I/O picture with M16 (NSFileManager path ops) and
+# M30 (in-memory NSData). fhcli.m: write via fileHandleForWritingAtPath: + two
+# writeData: calls, read via fileHandleForReadingAtPath: readDataToEndOfFile,
+# seekToFileOffset: + readDataOfLength: partial read, offsetInFile. Avoids the M16
+# removeItemAtPath gap (leaves the file in place). Selectors pre-vetted (M22); CF
+# by-path (M17). Installed at /usr/bin/fhcli. VERIFIED M37/S80 (live, matches host
+# exactly): M37-WRITE-OK / M37-READALL-DARWIN COMPUTA / M37-SEEKREAD-COMPUTA /
+# M37-OFFSET-14 / M37-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/fhcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-fhcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-fhcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/fhcli" ]; then
+            echo "--- M37/S80: staged fhcli at usr/bin/fhcli ---"
+        fi
+    else
+        echo "WARNING: fhcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
