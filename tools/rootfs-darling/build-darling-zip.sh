@@ -1423,6 +1423,26 @@ if [ -f "$APP_SRC/build-fmtcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M48 (S91): idxcli — NSIndexSet / NSMutableIndexSet index-set operations -----
+# A real Foundation collection (pure Foundation, no networking) — the integer-index
+# set behind table/list selection, distinct from M34's NSSet/NSOrderedSet (object
+# sets). idxcli.m: indexSetWithIndexesInRange:{2,3} count/contains, NSMutableIndexSet
+# addIndexesInRange:+addIndex: count/first/last, and ordered iteration via firstIndex/
+# indexGreaterThanIndex:. Selectors pre-vetted (M22); CF by-path (M17). Installed at
+# /usr/bin/idxcli. VERIFIED M48/S91 (live, matches host exactly): M48-COUNT-3 /
+# M48-HAS3-1 / M48-HAS5-0 / M48-MUTCOUNT-4 / M48-FIRST-2 / M48-LAST-10 /
+# M48-ITER-2,3,4,10 / M48-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/idxcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-idxcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-idxcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/idxcli" ]; then
+            echo "--- M48/S91: staged idxcli at usr/bin/idxcli ---"
+        fi
+    else
+        echo "WARNING: idxcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
