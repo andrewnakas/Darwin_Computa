@@ -1595,6 +1595,26 @@ if [ -f "$APP_SRC/build-gcdcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M56 (S99): gcd2cli — GCD coordination primitives (group/after/barrier) -------
+# Deepens M55's GCD proof to the COORDINATION patterns concurrent code uses (pure C
+# dispatch + blocks, no networking): dispatch_group fan-out 4 tasks + dispatch_group_
+# wait (GROUP-4), dispatch_after deferred ~50ms block + semaphore (AFTER-OK),
+# dispatch_barrier_sync exclusive write on a concurrent queue (BARRIER-OK). libdispatch
+# staged + re-exported by libSystem (M55); dispatch C API via <dispatch/dispatch.h>.
+# Symbols pre-vetted exported (M22); CF by-path (M17). Installed at /usr/bin/gcd2cli.
+# VERIFIED M56/S99 (live, matches host exactly): M56-GROUP-4 / M56-GROUP-OK /
+# M56-AFTER-OK / M56-BARRIER-OK / M56-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/gcd2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-gcd2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-gcd2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/gcd2cli" ]; then
+            echo "--- M56/S99: staged gcd2cli at usr/bin/gcd2cli ---"
+        fi
+    else
+        echo "WARNING: gcd2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
