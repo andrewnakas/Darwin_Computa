@@ -1463,6 +1463,29 @@ if [ -f "$APP_SRC/build-valcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M50 (S93): reportcli — CAPSTONE CLI SYNTHESIS (read->JSON->query->report->HMAC) -
+# The most capabilities composed in one program yet: a realistic "ingest -> query ->
+# report -> sign" pipeline chaining FIVE proven capabilities — NSFileHandle read (M37)
+# -> NSJSONSerialization (M7) -> NSPredicate filter + NSSortDescriptor (M24) ->
+# NSString format report (M47) -> HMAC-SHA256 (M20 libcrypto). reportcli.m writes a
+# JSON {name,score} file, reads it via a file handle, parses, filters score>=80, sorts
+# descending, formats a plain-text report, and HMAC-signs the report bytes (fixed key)
+# verified vs the authoritative host hex. Links Foundation + CoreFoundation (M17) +
+# libcrypto.44 (M20) BY PATH; HMAC extern; selectors pre-vetted (M22). Installed at
+# /usr/bin/reportcli. VERIFIED M50/S93 (live, matches host exactly): M50-READ-115 /
+# M50-PARSE-4 / M50-FILTER-3 / M50-TOP-gamma / M50-REPORT-REPORT|gamma=95|beta=88|delta=80|
+# / M50-HMAC-OK / M50-DONE — a full clean pass (no gaps). Run:
+# BW64_SHELLSPAWN=/usr/bin/reportcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-reportcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-reportcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/reportcli" ]; then
+            echo "--- M50/S93: staged reportcli at usr/bin/reportcli ---"
+        fi
+    else
+        echo "WARNING: reportcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
