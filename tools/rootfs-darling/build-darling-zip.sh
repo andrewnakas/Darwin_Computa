@@ -1162,6 +1162,28 @@ if [ -f "$APP_SRC/build-proccli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M36 (S79): timercli — NSTimer + NSRunLoop event-loop machinery -------------
+# The async/event-loop substrate (pure Foundation, no networking) GUI apps + async
+# code depend on. timercli.m schedules a ONE-SHOT NSTimer on the current run loop,
+# pumps the loop (runMode:beforeDate:), and confirms the callback is delivered + time
+# advanced. Selectors + NSDefaultRunLoopMode (CF const) pre-vetted (M22); CF by-path
+# (M17). KNOWN GUEST GAPS (non-gating, documented): (1) a REPEATING NSTimer fires
+# only ONCE under emulation; (2) -[NSThread sleepForTimeInterval:] HANGS. The probe
+# avoids both (one-shot timer, NSDate timing, no thread sleep). Installed at
+# /usr/bin/timercli. VERIFIED M36/S79 (live): M36-FIRED-1 / M36-FIRED-OK /
+# M36-ELAPSED-OK / M36-MAINTHREAD-1 / M36-DONE — a full clean pass on the gated
+# facets. Run:
+# BW64_SHELLSPAWN=/usr/bin/timercli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-timercli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-timercli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/timercli" ]; then
+            echo "--- M36/S79: staged timercli at usr/bin/timercli ---"
+        fi
+    else
+        echo "WARNING: timercli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
