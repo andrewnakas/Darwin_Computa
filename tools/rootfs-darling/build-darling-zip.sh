@@ -1749,6 +1749,29 @@ if [ -f "$APP_SRC/build-cachecli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M63 (S107): attrcli — NSAttributedString / NSMutableAttributedString ---------
+# Styled/rich text: a string with per-character-range attribute dictionaries — the
+# foundation of all rich text. Distinct from the plain-string tier (M29 processing,
+# M47 formatting). Pure Foundation (M3) + block runtime (M54); no net. Selectors
+# pre-vetted (M22); CoreFoundation BY PATH (M17). attrcli.m: build "Darwin Computa"
+# with @"weight"=bold over [0,6) and thin over [7,14), read attributesAtIndex:
+# effectiveRange:, extract a styled substring, enumerate attribute RUNS via a block.
+# Installed at /usr/bin/attrcli. VERIFIED M63/S107 (live, matches host): M63-LEN-14 /
+# M63-ATTR0-bold / M63-RANGE0-6 / M63-ATTR7-thin / M63-SUB-Computa / M63-RUNS-3 (3 runs
+# = bold / the unattributed space at index 6 / thin — correct enumeration semantics) /
+# M63-DONE. (NSMeasurement was considered but its conversion API
+# measurementByConvertingToUnit: is ABSENT.) Run:
+# BW64_SHELLSPAWN=/usr/bin/attrcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-attrcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-attrcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/attrcli" ]; then
+            echo "--- M63/S107: staged attrcli at usr/bin/attrcli ---"
+        fi
+    else
+        echo "WARNING: attrcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
