@@ -1815,6 +1815,32 @@ if [ -f "$APP_SRC/build-defcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M66 (S110): fm2cli — NSFileManager DEEP ops (recursive enum / copy / symlink) -
+# Extends M16's basic FS ops to recursive enumeration + copy + (attempted) symlinks —
+# the real-world filesystem ops apps use. Builds on the proven FS layer (M16 incl. the
+# S102 dir-removal fix). Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF
+# BY PATH (M17). fm2cli.m: build a 1-level tree, subpathsOfDirectoryAtPath: (>=3),
+# enumeratorAtPath: recursive (.txt count 2), copyItemAtPath: + read back. Installed at
+# /usr/bin/fm2cli. VERIFIED M66/S110 (live, matches host) on GATING facets:
+# M66-SUBPATHS-3 / M66-TXTCOUNT-2 / M66-COPY-OK / M66-COPYREAD-DARWIN / M66-DONE.
+# KNOWN GUEST GAP (non-gating, root-caused live): createSymbolicLinkAtPath: does NOT
+# create the link (M66-SYM-GAP-nocreate) — no host file at any layer (not a real symlink
+# nor the emulator's EXT_LINK ".link" file). The VFS symlink path EXISTS
+# (KProcess::symlink -> symlinkInDirectory, kprocess.cpp:1415) but Cocotron's BSD
+# symlink() isn't reaching it under Darwin syscall dispatch (Darwin BSD symlink #57 vs
+# the Linux x86-64 #88 the syscall64 table uses) — a deeper Darwin-syscall-mapping fix,
+# deferred. Run:
+# BW64_SHELLSPAWN=/usr/bin/fm2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-fm2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-fm2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/fm2cli" ]; then
+            echo "--- M66/S110: staged fm2cli at usr/bin/fm2cli ---"
+        fi
+    else
+        echo "WARNING: fm2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
