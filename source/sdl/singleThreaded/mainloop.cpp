@@ -22,6 +22,7 @@
 #include "knativesocket.h"
 #include "knativesystem.h"
 #include "knativethread.h"
+#include "../../x11wire/xwirepresent.h"
 
 #if !defined(BOXEDWINE_DISABLE_UI) && !defined(__TEST)
 #include "../../ui/mainui.h"
@@ -56,6 +57,19 @@ bool doMainLoop() {
             shouldQuit = true;
             break;
         }
+#ifdef BOXEDWINE_GUEST_X64
+        // Present the in-process X11 wire server's latest frame + PUMP HOST INPUT to
+        // the guest (mirrors the multi-threaded loop's tickXWirePresent at
+        // threadedMainloop.cpp:92). Without this, the single-threaded darwin GUI path
+        // (BOXEDWINE_MULTI_THREADED undefined) reads SDL events in processEvents() and
+        // enqueues them onto the XWire input queue, but nothing ever drains that queue
+        // to the guest when the app is idle (deliverInputEvents otherwise only runs
+        // inside XWireConnection::onData, i.e. only when the guest sends a request) —
+        // so live mouse clicks/keystrokes never reached the AppKit window. This call
+        // runs XWireServer::pumpInput() each slice (lock-free no-op when no input is
+        // queued), delivering ButtonPress/KeyPress to the focused guest window.
+        tickXWirePresent();
+#endif
         KNativeSystem::tick();
 #if !defined(BOXEDWINE_DISABLE_UI) && !defined(__TEST)
         if (uiIsRunning()) {

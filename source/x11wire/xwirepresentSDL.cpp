@@ -350,6 +350,13 @@ public:
     // thread; push() is mutex-guarded.
     void forwardSdlEvent(const SDL_Event& e) {
         XWireInputEvent ie;
+        // M-GUI-INPUT diagnostic: prove whether host SDL mouse/key events reach the
+        // forward path at all. Only the event types we care about, only under BW64_XWIRE.
+        if (getenv("BW64_XWIRE") &&
+            (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP ||
+             e.type == SDL_MOUSEMOTION || e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)) {
+            klog_fmt("XWire forwardSdl: got SDL event type=0x%x", (unsigned)e.type);
+        }
         switch (e.type) {
             case SDL_KEYDOWN:
             case SDL_KEYUP: {

@@ -746,6 +746,14 @@ void KNativeScreenSDL::recreateMainWindow() {
     if (KSystem::videoOption != VIDEO_NO_WINDOW) {
         destroyMainWindow();
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, scaleQuality.c_str());
+        // M-GUI-INPUT fix: deliver the mouse-button event that ALSO focuses/activates
+        // the window. Without this, macOS/SDL swallows the activating click (the click
+        // that brings the window forward) and never reports it as SDL_MOUSEBUTTONDOWN —
+        // so a guest GUI app's buttons never see the first press (observed live: motion
+        // 0x400 + keys delivered, but ZERO 0x401/0x402 button events reached
+        // processEvents()). With clickthrough on, the focusing click is also a normal
+        // button event, so guest AppKit windows receive mouseDown:.
+        SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
 
         int cx = input->width * input->scaleX / 100;
         int cy = input->height * input->scaleY / 100;
