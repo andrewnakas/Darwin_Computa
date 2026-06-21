@@ -1772,6 +1772,29 @@ if [ -f "$APP_SRC/build-attrcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M64 (S108): maptblcli — NSMapTable + NSHashTable (pointer collections) -------
+# The configurable-ownership collections (NSMapTable = dict-like map, NSHashTable =
+# set-like store, both supporting strong/weak ref policies) — lower-level cousins of
+# NSDictionary/NSSet for caches/observer-registries/object-graphs. Distinct from the
+# collections tier (M24/M26/M34/M45/M60). Pure Foundation (M3); no net. Selectors
+# pre-vetted (M22); CoreFoundation BY PATH (M17). maptblcli.m: NSMapTable strongToStrong
+# set3/get/count/remove/miss; NSHashTable add{x,y,z,y}/contains. Installed at
+# /usr/bin/maptblcli. VERIFIED M64/S108 (live, matches host): M64-MAPGET-beta /
+# M64-MAPCOUNT-3 / M64-MAPREMOVE-2 / M64-MAPMISS-1 / M64-HASHCOUNT-3 / M64-HASHHAS-1 /
+# M64-HASHNO-0 / M64-DONE — full clean pass. (M64 first tried NSLinguisticTagger [STUB,
+# 0 tokens] and rejected NSDateInterval/NSDateComponentsFormatter/NSLengthFormatter at
+# pre-vet — format selectors ABSENT.) Run:
+# BW64_SHELLSPAWN=/usr/bin/maptblcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-maptblcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-maptblcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/maptblcli" ]; then
+            echo "--- M64/S108: staged maptblcli at usr/bin/maptblcli ---"
+        fi
+    else
+        echo "WARNING: maptblcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
