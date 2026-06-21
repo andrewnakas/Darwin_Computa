@@ -1795,6 +1795,26 @@ if [ -f "$APP_SRC/build-maptblcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M65 (S109): defcli — NSUserDefaults persistent preferences -------------------
+# The standard Cocoa config store: typed key/value prefs persisted to a per-domain
+# plist on disk via the cfprefsd machinery. Builds on the plist tier (M25) + Foundation
+# (M3); no net. Selectors pre-vetted (M22); CoreFoundation BY PATH (M17). defcli.m:
+# set string/int/array, synchronize, read back typed (stringForKey/integerForKey/
+# arrayForKey), removeObjectForKey. Installed at /usr/bin/defcli. VERIFIED M65/S109
+# (live, matches host): M65-STR-darwin / M65-INT-42 / M65-ARR-3 / M65-SYNC-1 /
+# M65-REMOVED-1 / M65-DONE — full clean pass, AND it genuinely PERSISTS: defcli.plist
+# written to /var/root/Library/Preferences/ with count=42, items=[a,b,c], name removed.
+# Run: BW64_SHELLSPAWN=/usr/bin/defcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-defcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-defcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/defcli" ]; then
+            echo "--- M65/S109: staged defcli at usr/bin/defcli ---"
+        fi
+    else
+        echo "WARNING: defcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
