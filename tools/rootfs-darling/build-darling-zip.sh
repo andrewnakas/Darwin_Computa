@@ -1841,6 +1841,25 @@ if [ -f "$APP_SRC/build-fm2cli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M68 (S112): strcmpcli — NSString comparison + options-based search -----------
+# Everyday string ordering/searching: compare:options: (numeric + case-insensitive),
+# caseInsensitiveCompare:, rangeOfString:options: (backwards + anchored). Pure
+# Foundation string runtime (M29/M47); no net. Selectors pre-vetted (M22); CF BY PATH
+# (M17). strcmpcli.m: compare apple<banana, Darwin==darwin CI, file9<file10 numeric,
+# backwards last-'o' index 6, anchored foo@start, anchored bar not-at-start. Installed
+# at /usr/bin/strcmpcli. VERIFIED M68/S112 (live, matches host): M68-CMP--1 / M68-CI-0
+# / M68-NUM--1 / M68-BACK-6 / M68-ANCHOR-1 / M68-ANCHORNO-1 / M68-DONE — full clean pass.
+# Run: BW64_SHELLSPAWN=/usr/bin/strcmpcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-strcmpcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-strcmpcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/strcmpcli" ]; then
+            echo "--- M68/S112: staged strcmpcli at usr/bin/strcmpcli ---"
+        fi
+    else
+        echo "WARNING: strcmpcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
