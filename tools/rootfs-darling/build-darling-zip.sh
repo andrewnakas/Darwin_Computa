@@ -1881,6 +1881,26 @@ if [ -f "$APP_SRC/build-sortcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M70 (S114): notifcli — NSNotificationCenter (observer / pub-sub) -------------
+# The foundational Cocoa decoupling mechanism: post named notifications, any number of
+# observers receive them with an optional object + userInfo. Exercises the classic
+# selector observer AND the block observer (M54 blocks) + userInfo delivery +
+# removeObserver. Pure Foundation (M3) + block runtime (M54); no net. Selectors
+# pre-vetted (M22); CF BY PATH (M17). notifcli.m: addObserver:selector:name:object: +
+# post w/ userInfo, addObserverForName:object:queue:usingBlock:, removeObserver stops
+# delivery. Installed at /usr/bin/notifcli. VERIFIED M70/S114 (live, matches host):
+# M70-SEL-1 / M70-USERINFO-v / M70-BLOCK-1 / M70-REMOVED-1 / M70-DONE — full clean pass.
+# Run: BW64_SHELLSPAWN=/usr/bin/notifcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-notifcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-notifcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/notifcli" ]; then
+            echo "--- M70/S114: staged notifcli at usr/bin/notifcli ---"
+        fi
+    else
+        echo "WARNING: notifcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
