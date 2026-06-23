@@ -1860,6 +1860,27 @@ if [ -f "$APP_SRC/build-strcmpcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M69 (S113): sortcli — NSSortDescriptor multi-key sorting ---------------------
+# Extends the M24 query tier to MULTI-KEY descriptor sorting: sort records by a primary
+# key, tie-break with a secondary key, plus descending + selector-based (localized)
+# sort. Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17).
+# sortcli.m: 3 dept/name records -> dept ASC,name ASC (amy,bob,...), tie-break amy,bob,
+# name DESC (cara), selector localizedCaseInsensitiveCompare [B,a,C]->a,B,C. Installed
+# at /usr/bin/sortcli. VERIFIED M69/S113 (live, matches host): M69-MULTI-amy /
+# M69-MULTI2-bob / M69-TIEBREAK-amy,bob / M69-DESC-cara / M69-CI-a,B,C / M69-DONE.
+# (M69 first tried the NSDecimal C struct rounding API but the by-value-struct bridge
+# HUNG the guest — no output/exit/crash; pivoted to NSSortDescriptor.) Run:
+# BW64_SHELLSPAWN=/usr/bin/sortcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-sortcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-sortcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/sortcli" ]; then
+            echo "--- M69/S113: staged sortcli at usr/bin/sortcli ---"
+        fi
+    else
+        echo "WARNING: sortcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
