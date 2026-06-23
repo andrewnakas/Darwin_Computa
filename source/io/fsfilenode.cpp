@@ -302,10 +302,25 @@ U32 FsFileNode::getMode() {
             result |= K__S_IXGRP | K__S_IXOTH;
         }
     }
-    if (KThread::currentThread()->process->userId == 0 || this->path.startsWith("/tmp") || this->path.startsWith("/var") || this->path.startsWith("/home")) {
+    // M67: the writable-prefix heuristic below was written for wine guest paths
+    // (/tmp, /var, /home). The DARLING guest mounts everything under the
+    // /usr/libexec/darling chroot prefix (DPREFIX), so a darling path like
+    // /usr/libexec/darling/var/root/... never matched /var and getMode() withheld
+    // the write bit — making canWrite() false for freshly-created nodes, which broke
+    // symlink() (symlinkInDirectory's canWrite() gate -> EACCES) for the whole
+    // non-root darling userland (incl. launchd's LinuxHome symlink at boot). Strip
+    // the darling prefix before the prefix test so darling user paths are writable.
+    BString writeCheckPath = this->path;
+    if (writeCheckPath.startsWith("/usr/libexec/darling")) {
+        writeCheckPath = writeCheckPath.substr(strlen("/usr/libexec/darling"));
+        if (writeCheckPath.length() == 0) {
+            writeCheckPath = B("/");
+        }
+    }
+    if (KThread::currentThread()->process->userId == 0 || writeCheckPath.startsWith("/tmp") || writeCheckPath.startsWith("/var") || writeCheckPath.startsWith("/home") || writeCheckPath.startsWith("/Users")) {
         result |= K__S_IWRITE;
         // wine server needs to be private, but winetricks check "-w" in the script on /tmp which needs these 2
-        if (!this->path.startsWith("/tmp/.wine")) {
+        if (!writeCheckPath.startsWith("/tmp/.wine")) {
             result |= K__S_IWGRP | K__S_IWOTH;
         }
     }

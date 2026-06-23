@@ -15,21 +15,25 @@
  *   - copyItemAtPath: a.txt -> c.txt; the copy exists and reads back the original bytes.
  *
  * GATING FACETS (all proven live, matching host): recursive subpaths, recursive
- * enumerator, and copy. KNOWN GUEST GAP (non-gating, root-caused live):
- * createSymbolicLinkAtPath:withDestinationPath: does NOT create the link — no host
- * file appears at any layer (neither a real symlink nor the emulator's EXT_LINK
- * ".link" representation), so destinationOfSymbolicLinkAtPath: returns nil. The
- * symlink VFS path EXISTS (KProcess::symlink -> symlinkInDirectory, kprocess.cpp:1415,
- * stores a .link file) but Cocotron's BSD symlink() isn't reaching it under the Darwin
- * syscall dispatch (Darwin/BSD symlink is #57, distinct from the Linux x86-64 #88 the
- * emulator's syscall64 table uses) — a deeper Darwin-syscall-mapping fix, deferred.
- * The other deep FS ops all work, so the milestone gates on those + reports the gap.
+ * enumerator, copy, AND raw POSIX symlink (create + readlink) — the symlink path was
+ * fixed in the emulator at M67 (S111): getMode() withheld the write bit for darling
+ * guest paths (all under the /usr/libexec/darling chroot prefix, so the /tmp,/var,/home
+ * writable heuristic never matched), so symlinkInDirectory's canWrite() gate returned
+ * EACCES; M67 strips the darling prefix before the prefix test, so symlink() now works.
+ *
+ * KNOWN GUEST GAP (non-gating, COCOTRON not substrate): NSFileManager
+ * createSymbolicLinkAtPath:link withDestinationPath:dest issues the symlink() syscall
+ * with the args SWAPPED (it makes dest->link instead of link->dest; the syscall itself
+ * returns 0), so destinationOfSymbolicLinkAtPath:link finds nothing. Proven substrate-
+ * correct by the RAW POSIX symlink below succeeding (M66-RAWSYM-0/M66-RAWREAD-a.txt).
  *
  *   M66-SUBPATHS-<n>       subpathsOfDirectoryAtPath: count  (>= 3)
  *   M66-TXTCOUNT-<n>       .txt files via recursive enumeratorAtPath:  (== 2)
  *   M66-COPY-OK           copyItemAtPath: succeeded
  *   M66-COPYREAD-<s>       the copied file's contents  (== "DARWIN")
- *   M66-SYM-GAP-nocreate  createSymbolicLinkAtPath: did not create the link (guest gap)
+ *   M66-RAWSYM-0          raw POSIX symlink("a.txt", ".../rawlink") succeeded (M67 fix)
+ *   M66-RAWREAD-<s>        readlink(".../rawlink") resolves  (== "a.txt")
+ *   M66-SYM-GAP-nocreate  NSFileManager createSymbolicLinkAtPath: arg-swap (Cocotron gap)
  *   M66-DONE
  */
 #import <Foundation/Foundation.h>
@@ -75,7 +79,7 @@ int main(int argc, const char* argv[]) {
                                                        encoding:NSUTF8StringEncoding error:NULL];
         printf("M66-COPYREAD-%s\n", copyBody ? [copyBody UTF8String] : "nil"); fflush(stdout);
 
-        /* ---- symbolic link (KNOWN GAP — non-gating, reported for the record) */
+        /* ---- symbolic link via NSFileManager (KNOWN GAP — non-gating) ----- */
         NSString* link = @"/var/root/m66/link";
         [fm createSymbolicLinkAtPath:link withDestinationPath:@"a.txt" error:NULL];
         NSString* dest = [fm destinationOfSymbolicLinkAtPath:link error:NULL];
@@ -84,6 +88,17 @@ int main(int argc, const char* argv[]) {
         } else {
             printf("M66-SYM-GAP-nocreate\n"); fflush(stdout);
         }
+
+        /* ---- RAW posix symlink() to bisect Cocotron-wrapper vs VFS -------- */
+        extern int symlink(const char* target, const char* linkpath);
+        int rs = symlink("a.txt", "/var/root/m66/rawlink");   /* POSIX: link->target */
+        printf("M66-RAWSYM-%d\n", rs); fflush(stdout);
+        struct { char b[256]; } rb;
+        extern long readlink(const char*, char*, unsigned long);
+        long n = readlink("/var/root/m66/rawlink", rb.b, 255);
+        if (n > 0) { rb.b[n] = 0; printf("M66-RAWREAD-%s\n", rb.b); }
+        else printf("M66-RAWREAD-fail-%ld\n", n);
+        fflush(stdout);
 
         printf("M66-DONE\n"); fflush(stdout);
     }
