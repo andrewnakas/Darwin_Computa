@@ -1924,6 +1924,29 @@ if [ -f "$APP_SRC/build-undocli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M72 (S116): strops2cli — advanced NSString text ops -------------------------
+# Scoped/option-based replacement, range splice, charset search, block word enumeration.
+# Extends M29/M68. Pure Foundation (M3) + blocks (M54); no net. Selectors pre-vetted
+# (M22); CF BY PATH (M17). strops2cli.m: replace-all o->0, case-insensitive foo->X,
+# scoped replace range{0,3}, rangeOfCharacterFromSet digit@3, splice, ByWords enum.
+# Installed at /usr/bin/strops2cli. VERIFIED M72/S116 (live, matches host) on GATING:
+# M72-REPL-f00 b00 / M72-CIREPL-X X X / M72-SCOPED-bbba / M72-FINDDIGIT-3 /
+# M72-SPLICE-hello world / M72-SPLITOK-4 / M72-DONE. KNOWN GUEST GAP (non-gating,
+# root-caused live): enumerateSubstringsInRange:options:NSStringEnumerationByWords does
+# NOT segment — yields 1 substring not 4 for "the quick brown fox" (M72-WORDS-1 /
+# M72-WORDS-GAP-icuseg), a Cocotron/ICU text-segmentation limit (M17-class); the working
+# word split is componentsSeparatedByString: (M72-SPLITOK-4). Run:
+# BW64_SHELLSPAWN=/usr/bin/strops2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-strops2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-strops2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/strops2cli" ]; then
+            echo "--- M72/S116: staged strops2cli at usr/bin/strops2cli ---"
+        fi
+    else
+        echo "WARNING: strops2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
