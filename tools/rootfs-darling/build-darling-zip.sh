@@ -1947,6 +1947,27 @@ if [ -f "$APP_SRC/build-strops2cli.sh" ] && command -v clang >/dev/null 2>&1; th
     fi
 fi
 
+# --- M73 (S117): pipecli2 — NSPipe + NSFileHandle pipe I/O -------------------------
+# The byte-pipe primitive (the channel behind NSTask subprocess stdin/stdout): an NSPipe
+# gives a connected read-end + write-end NSFileHandle pair. Extends M37 (single-handle FD
+# I/O). Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17).
+# pipecli2.m: write "DARWIN", close write end, readDataOfLength:6; 2nd pipe write
+# "computa pipe", close, readDataToEndOfFile; read-end fileDescriptor valid. (Write end
+# closed before reading so EOF is honored — no blocking read.) Installed at
+# /usr/bin/pipecli2. VERIFIED M73/S117 (live, matches host): M73-LEN-6 / M73-DATA-DARWIN
+# / M73-FD-1 / M73-EOFLEN-12 / M73-EOFDATA-computa pipe / M73-DONE — full clean pass,
+# both exact-length and read-to-EOF (EOF-on-write-close honored). Run:
+# BW64_SHELLSPAWN=/usr/bin/pipecli2 bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-pipecli2.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-pipecli2.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/pipecli2" ]; then
+            echo "--- M73/S117: staged pipecli2 at usr/bin/pipecli2 ---"
+        fi
+    else
+        echo "WARNING: pipecli2 build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
