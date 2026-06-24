@@ -1901,6 +1901,29 @@ if [ -f "$APP_SRC/build-notifcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M71 (S115): undocli — NSUndoManager undo/redo edit history -------------------
+# The foundational Cocoa undo mechanism: register an inverse action (target+selector via
+# prepareWithInvocationTarget: NSInvocation forwarding), -undo invokes it to revert state
+# and re-registers for -redo. Exercises register/undo/redo, canUndo/canRedo, and undo
+# grouping. Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17).
+# GUEST REQUIREMENT (root-caused live): this Cocotron NSUndoManager THROWS 'forwardInvocation
+# called without first opening an undo group' if you register with no open group and
+# groupsByEvent is NO — so edits are wrapped in beginUndoGrouping/endUndoGrouping (this also
+# re-confirms the ObjC exception runtime, M40). undocli.m: 0->10->20, undo->10, redo->20,
+# grouped pair undone as one step ->0. Installed at /usr/bin/undocli. VERIFIED M71/S115
+# (live, matches host): M71-START-20 / M71-CANUNDO-1 / M71-UNDO-10 / M71-CANREDO-1 /
+# M71-REDO-20 / M71-GROUP-0 / M71-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/undocli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-undocli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-undocli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/undocli" ]; then
+            echo "--- M71/S115: staged undocli at usr/bin/undocli ---"
+        fi
+    else
+        echo "WARNING: undocli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
