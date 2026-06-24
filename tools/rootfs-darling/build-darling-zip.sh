@@ -1968,6 +1968,27 @@ if [ -f "$APP_SRC/build-pipecli2.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M74 (S118): b64modcli — MODERN NSData Base64 API -----------------------------
+# M22 proved the LEGACY base64 path; this confirms the modern standard API:
+# base64EncodedStringWithOptions: / initWithBase64EncodedString:options: /
+# initWithBase64EncodedData:options:. Pure Foundation (M3); no net. Selectors pre-vetted
+# (M22); CF BY PATH (M17). b64modcli.m: encode "Darwin Computa" == host
+# "RGFyd2luIENvbXB1dGE=", decode-from-string round trip, decode-from-NSData. Installed at
+# /usr/bin/b64modcli. VERIFIED M74/S118 (live, matches host): M74-ENC-RGFyd2luIENvbXB1dGE=
+# / M74-ENC-OK / M74-DEC-Darwin Computa / M74-ROUNDTRIP-OK / M74-DECDATA-OK / M74-DONE —
+# full clean pass (the modern base64 IS present even though the modern percent-encoding
+# is not, M22). Run:
+# BW64_SHELLSPAWN=/usr/bin/b64modcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-b64modcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-b64modcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/b64modcli" ]; then
+            echo "--- M74/S118: staged b64modcli at usr/bin/b64modcli ---"
+        fi
+    else
+        echo "WARNING: b64modcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
