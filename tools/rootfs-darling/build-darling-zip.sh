@@ -1989,6 +1989,26 @@ if [ -f "$APP_SRC/build-b64modcli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M75 (S119): synth7cli — SYNTHESIS #7: pipe->JSON->base64->HMAC ---------------
+# Proves the freshly-landed capabilities COMPOSE with the established data/crypto tiers
+# in ONE process: NSPipe transport (M73) -> NSJSONSerialization parse (M7) -> integer
+# aggregate -> modern NSData Base64 (M74) -> HMAC-SHA256 (M20). Links Foundation + CF
+# (M17) + libcrypto.44 (M20) BY PATH. synth7cli.m: JSON [{"v":3},{"v":4},{"v":5}] piped
+# + read back (25 bytes), parsed sum==12 -> "sum=12", base64 == host "c3VtPTEy", HMAC
+# (key "darwin") == host openssl value. Installed at /usr/bin/synth7cli. VERIFIED M75/S119
+# (live, matches host): M75-PIPED-25 / M75-SUM-12 / M75-B64-c3VtPTEy / M75-B64-OK /
+# M75-HMAC-f00b042d...a766 / M75-HMAC-OK / M75-DONE — full chain clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/synth7cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-synth7cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-synth7cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/synth7cli" ]; then
+            echo "--- M75/S119: staged synth7cli at usr/bin/synth7cli ---"
+        fi
+    else
+        echo "WARNING: synth7cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
