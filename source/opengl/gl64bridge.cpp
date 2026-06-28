@@ -33,6 +33,7 @@
 #include "kmemory64.h"
 #include "../x11wire/xwirepresent.h"
 #include "../x11wire/xwireserver.h"
+#include "knativesystem.h"   // M-GUI-INPUT: KNativeSystem::getScreen()->raiseMainWindow()
 
 #include <SDL.h>
 #ifdef __EMSCRIPTEN__
@@ -293,6 +294,14 @@ bool ensureContext() {
              (const char*)glGetString(GL_VENDOR),
              (const char*)glGetString(GL_RENDERER),
              (const char*)glGetString(GL_VERSION));
+    // M-GUI-INPUT: creating + making-current the hidden GL window above can leave it as
+    // the macOS key window, after which SDL routes mouse-BUTTON events to it (its NSView
+    // never feeds SDL's main queue) while motion/keys still reach the main window — so a
+    // guest GUI app's clicks never arrive. Pull key/mouse focus back to the main visible
+    // window now that GL is up. No-op on platforms/backends where this isn't needed.
+    if (KNativeSystem::getScreen()) {
+        KNativeSystem::getScreen()->raiseMainWindow();
+    }
     return true;
 #endif // __EMSCRIPTEN__
 }

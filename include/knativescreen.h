@@ -68,6 +68,14 @@ public:
 	// position. Default no-op for backends that don't support it.
 	virtual void setCursorByX11Shape(int shape) {}
 
+	// M-GUI-INPUT: restore key/input focus to the main visible window. On macOS the
+	// hidden GL present window (gl64bridge) can steal key-window status when its GL
+	// context is created/made-current, after which SDL routes mouse-BUTTON events to
+	// it (whose NSView never feeds SDL's main queue) while motion/keys still reach the
+	// main window. Re-raising the main window after GL init pulls button focus back.
+	// Default no-op so non-SDL backends need not implement it.
+	virtual void raiseMainWindow() {}
+
 	virtual void warpMouse(int x, int y) = 0;
 	virtual bool isVisible() = 0;
 

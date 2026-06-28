@@ -345,6 +345,20 @@ void KNativeScreenSDL::warpMouse(int x, int y) {
     DISPATCH_MAIN_THREAD_BLOCK_END
 }
 
+// M-GUI-INPUT: pull key/input focus back to the main visible window after the hidden
+// GL present window (gl64bridge) was created+made-current, which on macOS can leave the
+// GL window as the key window and steal mouse-BUTTON events. Raising the main window
+// here re-establishes it as the SDL keyboard/mouse-focus window so 0x401/0x402 button
+// events are delivered to it (motion/keys already were). No-op if the window is hidden
+// or absent. Must run on the main thread (NSWindow ops are main-thread-only on macOS).
+void KNativeScreenSDL::raiseMainWindow() {
+    DISPATCH_MAIN_THREAD_BLOCK_THIS_BEGIN
+        if (window && visible) {
+            SDL_RaiseWindow(window);
+        }
+    DISPATCH_MAIN_THREAD_BLOCK_END
+}
+
 bool KNativeScreenSDL::isVisible() {
     return visible;
 }

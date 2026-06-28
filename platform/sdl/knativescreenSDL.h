@@ -90,6 +90,7 @@ public:
     bool canBltToScreen() override;
 
     void warpMouse(int x, int y) override;
+    void raiseMainWindow() override;
     bool isVisible() override;
 
     bool clipboardIsTextAvailable() override;
