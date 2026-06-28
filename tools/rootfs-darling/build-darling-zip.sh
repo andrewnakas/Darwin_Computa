@@ -2009,6 +2009,27 @@ if [ -f "$APP_SRC/build-synth7cli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M76 (S120): arrcli — NSArray higher-order operations -------------------------
+# Everyday immutable-array transforms: selector-sort, predicate-filter, slice, KVC
+# projection, join, index-pick. Extends collections tier M24/M34/M54/M69. Pure
+# Foundation (M3); no net. Selectors pre-vetted (M22) — modern mutable selectors
+# (sortUsingComparator:/removeObjectsInArray:/exchange...) ABSENT in this Cocotron
+# vintage, avoided. CF BY PATH (M17). arrcli.m: sortedArrayUsingSelector:compare:,
+# filteredArrayUsingPredicate: SELF>1, subarrayWithRange, componentsJoinedByString,
+# valueForKey:uppercaseString [KVC proj], objectsAtIndexes. Installed at /usr/bin/arrcli.
+# VERIFIED M76/S120 (live, matches host): M76-SORT-1,2,3 / M76-FILTER-2 / M76-SLICE-b,c /
+# M76-JOIN-a-b-c / M76-KVC-A,B / M76-PICK-a,c / M76-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/arrcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-arrcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-arrcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/arrcli" ]; then
+            echo "--- M76/S120: staged arrcli at usr/bin/arrcli ---"
+        fi
+    else
+        echo "WARNING: arrcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
