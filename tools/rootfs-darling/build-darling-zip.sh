@@ -2051,6 +2051,27 @@ if [ -f "$APP_SRC/build-numf2cli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M79 (S123): datafilecli — NSData filesystem persistence + byte search --------
+# NSData convenience layer: writeToFile:atomically: -> dataWithContentsOfFile: round trip
+# (byte-identical), rangeOfData:options:range: forward+backward search, subdataWithRange:
+# slice. Ties together M16 (FS) + M30 (NSData) + M37 (file I/O). Pure Foundation (M3); no
+# net. Selectors pre-vetted (M22); CF BY PATH (M17); scratch /tmp (guest-writable M16/M65).
+# datafilecli.m: 16-byte "DARWIN-COMPUTA!\n" atomic write+reload, find "-" fwd@6, find "A"
+# back@13, slice{7,7}="COMPUTA". Installed at /usr/bin/datafilecli. VERIFIED M79/S123 (live,
+# matches host): M79-WROTE-16 / M79-READBACK-16 / M79-ROUNDTRIP-OK / M79-FINDFWD-6 /
+# M79-FINDBACK-13 / M79-SLICE-COMPUTA / M79-DONE — full clean pass (atomic write temp+rename
+# on substrate FS, byte-identical reload, bidirectional search). Run:
+# BW64_SHELLSPAWN=/usr/bin/datafilecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-datafilecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-datafilecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/datafilecli" ]; then
+            echo "--- M79/S123: staged datafilecli at usr/bin/datafilecli ---"
+        fi
+    else
+        echo "WARNING: datafilecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
