@@ -2030,6 +2030,27 @@ if [ -f "$APP_SRC/build-arrcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M78 (S122): numf2cli — NSNumberFormatter formatting controls -----------------
+# Fraction-digit control, formatter-driven rounding (HALF_UP), zero-padding. Extends M28.
+# Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17); locale PINNED
+# en_US_POSIX (M28 lesson). numf2cli.m gates on the 3 working structured controls vs host:
+# M78-FRAC2-3.14 (min2/max2 on 3.14159), M78-ROUNDUP-2.56 (RoundHalfUp 2.555@2 — the
+# FORMATTER's rounding works, distinct from M53's BROKEN NSDecimalNumberHandler rounding),
+# M78-PAD3-5.000 (min3 zero-pad), M78-CTRLS-OK. KNOWN GUEST GAP (non-gating, root-caused
+# live): setPositiveFormat: PATTERN STRING is IGNORED — 7 -> "7" not host "7.0"
+# (M78-POSFMT-GAP-pattern); use the structured setters, not raw pattern strings. Installed
+# at /usr/bin/numf2cli. VERIFIED M78/S122 (live). Run:
+# BW64_SHELLSPAWN=/usr/bin/numf2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-numf2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-numf2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/numf2cli" ]; then
+            echo "--- M78/S122: staged numf2cli at usr/bin/numf2cli ---"
+        fi
+    else
+        echo "WARNING: numf2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
