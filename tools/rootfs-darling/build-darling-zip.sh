@@ -2072,6 +2072,27 @@ if [ -f "$APP_SRC/build-datafilecli.sh" ] && command -v clang >/dev/null 2>&1; t
     fi
 fi
 
+# --- M80 (S124): plist2cli — NSPropertyList XML+binary round-trip + format detect --
+# Deeper than M25 (binary-only): serialize the SAME dict to BOTH XML and binary plist
+# formats, read each back, confirm round-trip equality AND that the reader reports which
+# format it parsed (the format out-param) — the mechanism behind every .plist config file.
+# Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17). Gates on
+# STRUCTURAL facts (equality + format-detect + XML-readable), not byte lengths (M25 lesson).
+# plist2cli.m: {name,count,items} -> XML "<?xml" + fmt100 + deep-eq, binary + fmt200 +
+# deep-eq. Installed at /usr/bin/plist2cli. VERIFIED M80/S124 (live, matches host):
+# M80-XMLHEAD-1 / M80-XMLFMT-100 / M80-XMLEQ-OK / M80-BINFMT-200 / M80-BINEQ-OK / M80-DONE
+# — full clean pass (XML writer works, which M25 hadn't exercised). Run:
+# BW64_SHELLSPAWN=/usr/bin/plist2cli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-plist2cli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-plist2cli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/plist2cli" ]; then
+            echo "--- M80/S124: staged plist2cli at usr/bin/plist2cli ---"
+        fi
+    else
+        echo "WARNING: plist2cli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
