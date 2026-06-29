@@ -2093,6 +2093,28 @@ if [ -f "$APP_SRC/build-plist2cli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M81 (S125): strlinecli — NSString line + character-set processing ------------
+# Line-oriented + charset-based string ops, extends M29/M72. Pure Foundation (M3) +
+# blocks (M54); no net. Selectors pre-vetted (M22); CF BY PATH (M17). strlinecli.m gates
+# on the working facets vs host: M81-SPLIT-4 + M81-SPLITJOIN-a|b|c|d
+# (componentsSeparatedByCharactersInSet), M81-LINESPLIT-3 + M81-LASTLINE-three
+# (componentsSeparatedByString:"\n" — the WORKING line split), M81-TRIM-hello +
+# M81-WTRIM-pad (stringByTrimmingCharactersInSet). KNOWN GAP (non-gating, root-caused
+# live, SAME CLASS as M72 ByWords): enumerateLinesUsingBlock: enumerates PER-CHARACTER not
+# per-line — 13 not 3 for "one\ntwo\nthree" (M81-LINES-GAP-perchar); Cocotron block text-
+# segmentation broken, use componentsSeparatedBy. Installed at /usr/bin/strlinecli.
+# VERIFIED M81/S125 (live). Run:
+# BW64_SHELLSPAWN=/usr/bin/strlinecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-strlinecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-strlinecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/strlinecli" ]; then
+            echo "--- M81/S125: staged strlinecli at usr/bin/strlinecli ---"
+        fi
+    else
+        echo "WARNING: strlinecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
