@@ -2136,6 +2136,27 @@ if [ -f "$APP_SRC/build-introcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M83 (S127): kvocli — Key-Value Observing (KVO) -------------------------------
+# Cornerstone Cocoa mechanism: automatic change notification on property mutation (the
+# engine behind bindings). The AUTOMATIC path needs runtime isa-swizzling (synthesize a
+# KVO subclass overriding the setter) — a deep runtime test. Distinct from M70 (notif
+# pub/sub) + M58 (KVC). Pure Foundation (M3); no net. Selectors pre-vetted (M22); CF BY
+# PATH (M17). kvocli.m probes BOTH the automatic path (m.value=42 -> observe fires
+# change[New]==42) AND manual will/didChangeValueForKey:. Installed at /usr/bin/kvocli.
+# VERIFIED M83/S127 (live, matches host EXACTLY): M83-AUTOHITS-1 / M83-AUTOLAST-42 /
+# M83-AUTO-OK (isa-swizzling KVO works!) / M83-MANUALHITS-2 / M83-MANUAL-OK / M83-DONE —
+# full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/kvocli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-kvocli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-kvocli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/kvocli" ]; then
+            echo "--- M83/S127: staged kvocli at usr/bin/kvocli ---"
+        fi
+    else
+        echo "WARNING: kvocli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
