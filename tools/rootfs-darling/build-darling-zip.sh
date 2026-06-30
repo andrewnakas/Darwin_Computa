@@ -2115,6 +2115,27 @@ if [ -f "$APP_SRC/build-strlinecli.sh" ] && command -v clang >/dev/null 2>&1; th
     fi
 fi
 
+# --- M82 (S126): introcli — NSObject runtime introspection + dynamic dispatch -----
+# The reflective core of the ObjC runtime (behind KVC/archiving/bindings): class
+# membership, selector probing, protocol conformance, and DYNAMIC performSelector:
+# dispatch. Exercises the objc runtime directly (already proven via M5a/M40). Pure
+# Foundation (M3); no net. Selectors pre-vetted (M22); CF BY PATH (M17); dodges all
+# known-broken classes. introcli.m: isKindOfClass YES/NO, respondsToSelector YES/NO,
+# performSelector(uppercaseString)->DARWIN, performSelector:withObject:(",")->3,
+# conformsToProtocol:NSCopying. Installed at /usr/bin/introcli. VERIFIED M82/S126 (live,
+# matches host): M82-KIND-1 / M82-KINDNO-0 / M82-RESP-1 / M82-RESPNO-0 / M82-PERFORM-DARWIN
+# / M82-PERFORMARG-3 / M82-PROTO-1 / M82-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/introcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-introcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-introcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/introcli" ]; then
+            echo "--- M82/S126: staged introcli at usr/bin/introcli ---"
+        fi
+    else
+        echo "WARNING: introcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
