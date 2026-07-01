@@ -2954,7 +2954,12 @@ U32 KProcess::timerfd_settime(U32 fildes, U32 flags, U32 newValue, U32 oldValue)
     if (!fd) {
         return -K_EBADF;
     }
-    if (fd->kobject->type != KTYPE_SIGNAL) {
+    // M88 EMULATOR FIX: timerfd_create() makes a KTimer (KTYPE_TIMER); this guard
+    // wrongly checked KTYPE_SIGNAL (a copy-paste from the KSignal path), so EVERY
+    // timerfd_settime returned -EINVAL. That made Darling's libkqueue EVFILT_TIMER
+    // arming fail, so libdispatch/CFRunLoop repeating timers fired only ONCE and
+    // never re-armed (the M36 NSTimer + M59 dispatch_source "fire-once" gap).
+    if (fd->kobject->type != KTYPE_TIMER) {
         return -K_EINVAL;
     }
     if (!newValue) {
@@ -2998,7 +3003,9 @@ U32 KProcess::timerfd_gettime(U32 fildes, U32 value) {
     if (!fd) {
         return -K_EBADF;
     }
-    if (fd->kobject->type != KTYPE_SIGNAL) {
+    // M88 EMULATOR FIX: same wrong-type guard as timerfd_settime — the fd is a
+    // KTimer (KTYPE_TIMER), not KTYPE_SIGNAL. See timerfd_settime above.
+    if (fd->kobject->type != KTYPE_TIMER) {
         return -K_EINVAL;
     }
     if (!value) {
