@@ -2157,6 +2157,27 @@ if [ -f "$APP_SRC/build-kvocli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M84 (S128): invcli — NSInvocation dynamic method construction ----------------
+# Build + dispatch a method call entirely at runtime: methodSignatureForSelector: ->
+# invocationWithMethodSignature: -> setTarget/setSelector/setArgument:atIndex: -> invoke
+# -> getReturnValue:. The reflective-dispatch core behind NSUndoManager (M71),
+# forwardInvocation:, XPC. Deep runtime/reflection vein (M82/M83). Pure Foundation (M3);
+# no net. Selectors pre-vetted (M22); CF BY PATH (M17); built -fno-objc-arc (standard).
+# invcli.m exercises OBJECT return (stringByAppendingString:->darwin-computa) AND SCALAR
+# return (intValue->5). Installed at /usr/bin/invcli. VERIFIED M84/S128 (live, matches
+# host): M84-NARGS-3 / M84-RET-darwin-computa / M84-INTRET-5 / M84-DONE — full clean pass
+# (getReturnValue: handles both boxed pointer + primitive). Run:
+# BW64_SHELLSPAWN=/usr/bin/invcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-invcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-invcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/invcli" ]; then
+            echo "--- M84/S128: staged invcli at usr/bin/invcli ---"
+        fi
+    else
+        echo "WARNING: invcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
