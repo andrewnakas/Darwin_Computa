@@ -2178,6 +2178,27 @@ if [ -f "$APP_SRC/build-invcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M85 (S129): rtcli — objc runtime C-API (associated objects + class introspect) --
+# C-level counterpart to M82's ObjC-level introspection: libobjc directly via
+# <objc/runtime.h> — objc_set/getAssociatedObject, class_getName, class_getSuperclass,
+# class_copyMethodList, object_getClass. The layer low-level frameworks + Swift interop
+# use. Runtime/reflection vein (M82/M83/M84). Pure Foundation (M3) + libobjc C API; no net.
+# C symbols pre-vetted PRESENT via nm (M22); CF BY PATH (M17); -fno-objc-arc. rtcli.m:
+# associated-object round trip, class name/superclass/method-list, object_getClass.
+# Installed at /usr/bin/rtcli. VERIFIED M85/S129 (live, matches host): M85-ASSOC-attached-
+# darwin / M85-CLSNAME-NSString / M85-SUPER-NSString / M85-METHODS-1 / M85-INSTCLS-1 /
+# M85-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/rtcli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-rtcli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-rtcli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/rtcli" ]; then
+            echo "--- M85/S129: staged rtcli at usr/bin/rtcli ---"
+        fi
+    else
+        echo "WARNING: rtcli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
