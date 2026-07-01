@@ -2199,6 +2199,28 @@ if [ -f "$APP_SRC/build-rtcli.sh" ] && command -v clang >/dev/null 2>&1; then
     fi
 fi
 
+# --- M86 (S130): dynclscli — DYNAMIC CLASS CREATION at runtime --------------------
+# The deepest objc-runtime test: build an entire class from scratch —
+# objc_allocateClassPair(NSObject,"DarwinDyn",0) + class_addIvar + class_addMethod (methods
+# backed by C-function IMPs + type encodings) + objc_registerClassPair — then instantiate
+# and dispatch the synthesized method. This is what KVO (M83) + NSKeyedUnarchiver do
+# internally. Runtime/reflection vein (M82/83/84/85). Pure Foundation (M3) + libobjc C API;
+# no net. Symbols pre-vetted via nm (M22); CF BY PATH (M17); -fno-objc-arc; host-validated.
+# dynclscli.m: class w/ -(int)answer->42, -(void)setTag:/-(int)tag ivar accessors.
+# Installed at /usr/bin/dynclscli. VERIFIED M86/S130 (live, matches host): M86-ALLOC-1 /
+# M86-ANSWER-42 (synthesized method dispatched to our C IMP) / M86-IVAR-7 (dynamic ivar
+# round-trip) / M86-CLSNAME-DarwinDyn / M86-ISA-1 / M86-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/dynclscli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-dynclscli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-dynclscli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/dynclscli" ]; then
+            echo "--- M86/S130: staged dynclscli at usr/bin/dynclscli ---"
+        fi
+    else
+        echo "WARNING: dynclscli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
