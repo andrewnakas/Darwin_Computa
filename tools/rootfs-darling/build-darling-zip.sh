@@ -2221,6 +2221,27 @@ if [ -f "$APP_SRC/build-dynclscli.sh" ] && command -v clang >/dev/null 2>&1; the
     fi
 fi
 
+# --- M87 (S131): swizzlecli — method swizzling (method_exchangeImplementations) ---
+# The classic runtime dispatch-table manipulation (analytics/testing/AOP): exchange two
+# methods' IMPs on an existing class so selector A runs B's code + vice versa. Distinct
+# from M86 (new class) — MODIFIES an existing class's method table. Last major objc-runtime
+# primitive (M82/83/84/85/86 all clean). Pure Foundation (M3) + libobjc C API; no net.
+# Symbols pre-vetted via nm (M22); CF BY PATH (M17); -fno-objc-arc; host-validated.
+# swizzlecli.m: Widget -(label)->"original" / -(swizzledLabel)->"swizzled", exchange,
+# verify both ways. Installed at /usr/bin/swizzlecli. VERIFIED M87/S131 (live, matches
+# host): M87-BEFORE-original / M87-AFTER-swizzled / M87-SYMM-original / M87-SWIZZLE-OK /
+# M87-DONE — full clean pass. Run:
+# BW64_SHELLSPAWN=/usr/bin/swizzlecli bash tools/run_darling_cli.sh /usr/bin/darlingserver.
+if [ -f "$APP_SRC/build-swizzlecli.sh" ] && command -v clang >/dev/null 2>&1; then
+    if bash "$APP_SRC/build-swizzlecli.sh" >/dev/null 2>&1; then
+        if [ -f "$STAGEHOST/dist/stage/usr/libexec/darling/usr/bin/swizzlecli" ]; then
+            echo "--- M87/S131: staged swizzlecli at usr/bin/swizzlecli ---"
+        fi
+    else
+        echo "WARNING: swizzlecli build failed; not staged." >&2
+    fi
+fi
+
 # --- M7 (S50): jsoncli — JSON parse + serialize via NSJSONSerialization --------
 # A Foundation data-tier capability on the proven Foundation/ObjC runtime.
 # jsoncli.m parses a JSON doc, reads typed values (string/number/nested array),
